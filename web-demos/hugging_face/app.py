@@ -88,10 +88,10 @@ def process_video(input_video, mask_video, mask_dilation, progress=gr.Progress()
             "--mask", str(mask_dir),
             "--output", str(work_dir),
             "--mask_dilation", str(mask_dilation),
-            "--subvideo_length 10",
-            "--raft_iter 50",
-            "--ref_stride 10",
-            "--neighbor_length 10"
+            "--subvideo_length", "10",
+            "--raft_iter", "50",
+            "--ref_stride", "10",
+            "--neighbor_length", "10"
         ]
 
         print(f"Running: {' '.join(cmd)}")
