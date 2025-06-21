@@ -23,6 +23,98 @@ warnings.filterwarnings("ignore")
 
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
+def save_video_highest_quality(frames, output_path, fps, reference_video=None):
+    """Save video with maximum quality preservation using FFmpeg directly"""
+    import tempfile
+    import subprocess
+    import shutil
+    import os
+    
+    # Create temp directory
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Save frames as 16-bit PNG for even better quality
+        print("Saving frames as 16-bit PNGs...")
+        for i, frame in enumerate(tqdm(frames)):
+            # Convert to 16-bit to preserve more color information
+            frame_16bit = (frame.astype(np.float32) * 257).astype(np.uint16)
+            
+            # Save as 16-bit PNG (completely lossless)
+            png_path = os.path.join(temp_dir, f'frame_{i:06d}.png')
+            cv2.imwrite(png_path, cv2.cvtColor(frame_16bit, cv2.COLOR_RGB2BGR), 
+                       [cv2.IMWRITE_PNG_COMPRESSION, 0])  # No compression
+        
+        # Build FFmpeg command with maximum quality settings
+        cmd = [
+            'ffmpeg', '-y',
+            # Input settings
+            '-framerate', str(fps),
+            '-i', os.path.join(temp_dir, 'frame_%06d.png'),
+            '-pix_fmt', 'rgb48le',  # Read as 16-bit RGB
+            
+            # ProRes 4444 settings
+            '-c:v', 'prores_ks',
+            '-profile:v', '4',  # ProRes 4444
+            '-pix_fmt', 'yuv444p10le',  # 10-bit 4:4:4
+            '-vendor', 'ap10',
+            
+            # Color management
+            '-color_primaries', 'bt709',
+            '-color_trc', 'bt709',
+            '-colorspace', 'bt709',
+            '-color_range', 'tv',  # Limited range (16-235)
+            
+            # Quality settings
+            '-bits_per_mb', '8000',
+            '-quant_mat', 'proxy',  # Best quality matrix
+            
+            # MOV container settings
+            '-movflags', '+write_colr+faststart',
+            '-write_tmcd', '0',  # No timecode track
+            
+            # Output
+            output_path
+        ]
+        
+        # If we have a reference video, copy its exact color properties
+        if reference_video:
+            # Extract color properties from reference
+            probe_cmd = [
+                'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries',
+                '-of', 'json', reference_video
+            ]
+            result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                import json
+                ref_info = json.loads(result.stdout)['streams'][0]
+                
+                # Update command with reference color properties
+                for key, flag in [
+                    ('color_primaries', '-color_primaries'),
+                    ('color_transfer', '-color_trc'),
+                    ('color_space', '-colorspace'),
+                    ('color_range', '-color_range')
+                ]:
+                    if key in ref_info:
+                        idx = cmd.index(flag)
+                        cmd[idx + 1] = ref_info[key]
+        
+        # Run FFmpeg
+        print("Encoding to ProRes 4444...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"FFmpeg error: {result.stderr}")
+            raise RuntimeError("FFmpeg encoding failed")
+            
+    finally:
+        # Clean up temp files
+        shutil.rmtree(temp_dir)
+    
+    print(f"Saved {output_path} with maximum quality")
+    
 def imwrite(img, file_path, params=None, auto_mkdir=True):
     if auto_mkdir:
         dir_name = os.path.abspath(os.path.dirname(file_path))
@@ -468,8 +560,21 @@ if __name__ == '__main__':
     # save videos frame
     masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
     comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
-    imageio.mimwrite(os.path.join(save_root, 'masked_in.mp4'), masked_frame_for_save, fps=fps, quality=7)
-    imageio.mimwrite(os.path.join(save_root, 'inpaint_out.mp4'), comp_frames, fps=fps, quality=7)
+    # imageio.mimwrite(os.path.join(save_root, 'masked_in.mp4'), masked_frame_for_save, fps=fps, quality=7)
+    # imageio.mimwrite(os.path.join(save_root, 'inpaint_out.mp4'), comp_frames, fps=fps, quality=7)# Use high-quality FFmpeg encoding
+    save_video_highest_quality(
+        comp_frames, 
+        os.path.join(save_root, 'inpaint_out.mov'),
+        fps=fps,
+        reference_video=args.video
+    )
+    
+    save_video_highest_quality(
+        masked_frame_for_save,
+        os.path.join(save_root, 'masked_in.mov'),
+        fps=fps,
+        reference_video=args.video
+    )
     
     print(f'\nAll results are saved in {save_root}')
     
