@@ -195,7 +195,7 @@ def process_video(input_video_preview, mask_video_preview, mask_dilation, progre
     """Process video with WirePainter"""
     
     if not input_video_preview or not mask_video_preview:
-        return None, None, None, None
+        return None, None, "<p style='color: #666; font-style: italic;'>No processing completed</p>", "<p style='color: #666; font-style: italic;'>No processing completed</p>"
     
     try:
         progress(0.1, desc="Starting...")
@@ -243,7 +243,7 @@ def process_video(input_video_preview, mask_video_preview, mask_dilation, progre
         if not mask_files:
             return None, None, None, None
         
-        progress(0.5, desc="Running WirePainter...")
+        progress(0.5, desc="Running inpainting...")
         
         # Build WirePainter command
         cmd = [
@@ -272,7 +272,7 @@ def process_video(input_video_preview, mask_video_preview, mask_dilation, progre
         )
         
         if result.returncode != 0:
-            error_msg = f"WirePainter failed:\n{result.stderr}\n{result.stdout}"
+            error_msg = f"Doya failed:\n{result.stderr}\n{result.stdout}"
             print(error_msg)
             return None, None, None, None
         
@@ -331,14 +331,15 @@ def process_video(input_video_preview, mask_video_preview, mask_dilation, progre
             preview_output = create_mp4_preview(str(final_output))
             preview_masked = create_mp4_preview(str(final_masked_in)) if final_masked_in else None
             
-            # Return paths
-            download_output = str(final_output) if output_ext == '.mov' else None
-            download_masked = str(final_masked_in) if final_masked_in and output_ext == '.mov' else None
+            # Create download HTML links
+            download_output_html = f'<a href="file={final_output}" download="{final_output.name}" style="display: inline-block; padding: 8px 16px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px; margin: 4px 0;">📥 Download Inpainted Output (ProRes MOV)</a>' if output_ext == '.mov' else "<p style='color: #666; font-style: italic;'>No MOV output available</p>"
+            
+            download_masked_html = f'<a href="file={final_masked_in}" download="{final_masked_in.name}" style="display: inline-block; padding: 8px 16px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px; margin: 4px 0;">📥 Download Masked Input (ProRes MOV)</a>' if final_masked_in and output_ext == '.mov' else "<p style='color: #666; font-style: italic;'>No MOV masked input available</p>"
             
             return (preview_output, 
                     preview_masked, 
-                    download_output, 
-                    download_masked)
+                    download_output_html, 
+                    download_masked_html)
         else:
             return None, None, None, None
     
@@ -349,16 +350,18 @@ def process_video(input_video_preview, mask_video_preview, mask_dilation, progre
         return None, None, None, None
 
 # Create Gradio interface
-with gr.Blocks(title="WirePainter") as demo:
+css = """
+footer {visibility: hidden}
+.footer {visibility: hidden}
+.footer-container {visibility: hidden}
+"""
+
+# Create Gradio interface
+with gr.Blocks(title="豆芽 Doya", theme=gr.themes.Soft(), css=css) as demo:
     gr.Markdown("""
-    # WirePainter - Stunt Wire Inpainting Demo
+    # 豆芽 Doya - The Stunt Wire Remover Agent
     
     Upload a video and a mask video. White pixels in the mask will be inpainted.
-    
-    **Note:** 
-    - MOV/AVI files are automatically converted to MP4 for preview
-    - Processing always uses your original high-quality files
-    - ProRes MOV downloads available when MOV output is generated
     """)
     
     with gr.Row():
@@ -385,10 +388,15 @@ with gr.Blocks(title="WirePainter") as demo:
             output_video = gr.Video(label="Inpainted Output (Preview)")
             masked_in_video = gr.Video(label="Masked Input (Preview)")
             
-            # Simple download buttons for high-quality MOV files
+            # Simple download links for high-quality MOV files
             gr.Markdown("### High-Quality Downloads (when available):")
-            download_output_btn = gr.File(label="Download Inpainted Output (ProRes MOV)", visible=True)
-            download_masked_btn = gr.File(label="Download Masked Input (ProRes MOV)", visible=True)
+            download_output_btn = gr.HTML(
+                value="<p style='color: #666; font-style: italic;'>Download Inpainted Output (ProRes MOV) - Available after processing</p>",
+                label="Download Links"
+            )
+            download_masked_btn = gr.HTML(
+                value="<p style='color: #666; font-style: italic;'>Download Masked Input (ProRes MOV) - Available after processing</p>"
+            )
     
     # Handle video uploads to create previews
     input_video.change(
