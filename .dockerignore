@@ -1,0 +1,18 @@
+# Ignore files not needed in Docker build
+.git
+.gitignore
+*.pyc
+__pycache__/
+.pytest_cache/
+.vscode/
+.idea/
+assets/
+configs/
+datasets/
+scripts/
+web-demos/
+results/
+requirements.txt
+train.py
+LICENSE
+README.md
