@@ -7,6 +7,6 @@ RUN pip install --no-cache-dir \
     einops pyyaml requests matplotlib runpod
 
 # Set working directory to the handler script's folder inside the mounted volume
-WORKDIR /runpod-volume/workspace/ProPainter-Wire
+WORKDIR /runpod-volume/ProPainter-Wire
 
 CMD ["python3", "-u", "runpod_handler.py"]
