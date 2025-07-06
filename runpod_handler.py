@@ -19,9 +19,9 @@ def handler(job):
         input_video = job["input"].get("input_video")
         mask_video = job["input"].get("mask_video")
         mask_dilation = job["input"].get("mask_dilation", 4)
-        ref_stride = job["input"].get("ref_stride", 10)
+        ref_stride = job["input"].get("ref_stride", 1)
         neighbor_length = job["input"].get("neighbor_length", 10)
-        subvideo_length = job["input"].get("subvideo_length", 80)
+        subvideo_length = job["input"].get("subvideo_length", 20)
         raft_iter = job["input"].get("raft_iter", 20)
 
 
