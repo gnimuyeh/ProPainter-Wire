@@ -1,13 +1,5 @@
-# VCS & IDE
-.git
-.gitignore
-.vscode/
-.idea/
-
-# Python cache
-__pycache__/
-*.pyc
-.pytest_cache/
+# Hidden files
+.*
 
 # Large or unneeded dirs
 assets/
