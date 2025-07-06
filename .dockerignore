@@ -1,18 +1,26 @@
-# Ignore files not needed in Docker build
+# VCS & IDE
 .git
 .gitignore
-*.pyc
-__pycache__/
-.pytest_cache/
 .vscode/
 .idea/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Large or unneeded dirs
 assets/
 configs/
 datasets/
 scripts/
 web-demos/
 results/
-requirements.txt
+outputs/
+
+# Dev files not needed in image
+requirement.txt
 train.py
+test_input.json
 LICENSE
 README.md

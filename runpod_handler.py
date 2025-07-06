@@ -39,7 +39,7 @@ def handler(job):
             "--neighbor_length", str(neighbor_length),
             "--subvideo_length", str(subvideo_length),
             "--raft_iter", str(raft_iter),
-            "--output", "outputs",
+            "--output", "/runpod-volume/outputs",
             "--fp16"
         ]
 
@@ -47,10 +47,14 @@ def handler(job):
         result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
 
         if result.returncode != 0:
-            return {"error": result.stderr}
+            return {
+                "status": "error",
+                "message": "Inference failed.",
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
 
-        # On success, return path or success message
-        return {"output": "outputs/inpainted_output.mov"}
+        return {"status": "success", "output": "/runpod-volume/outputs/inpainted_output.mov"}
 
     except Exception as e:
         return {"error": str(e)}
