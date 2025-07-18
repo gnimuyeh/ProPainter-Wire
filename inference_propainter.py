@@ -72,8 +72,6 @@ def extract_frames_to_png(video_path, output_dir, is_mask=False):
     cmd += [str(output_dir / pattern)]
     cmd += ['-y']  # Overwrite
     
-    # print(f"Extracting frames: {' '.join(cmd)}")
-    
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -87,7 +85,6 @@ def extract_frames_to_png(video_path, output_dir, is_mask=False):
         raise RuntimeError("Frame extraction failed")
     
     extracted_files = list(output_dir.glob('*.png'))
-    # print(f"Extracted {len(extracted_files)} frames to {output_dir}")
     return len(extracted_files)
 
 def save_video_highest_quality(frames, output_path, fps, reference_video=None):
@@ -102,37 +99,26 @@ def save_video_highest_quality(frames, output_path, fps, reference_video=None):
     # Build FFmpeg command with stdin input
     cmd = [
         'ffmpeg', '-y',
-        # Input settings (raw RGB from stdin)
         '-f', 'rawvideo',
         '-pix_fmt', 'rgb24',
         '-s', f'{w}x{h}',
         '-r', str(fps),
-        '-i', '-',  # Read from stdin
-        
-        # Encoder settings
+        '-i', '-',  
         '-c:v', 'prores_ks',
-        '-profile:v', '5',  # ProRes 4444 XQ
-        '-pix_fmt', 'yuv444p12le',  # 12-bit YUV
-        '-vendor', 'apl0',  # Apple-compatible
-        
-        # Color management
+        '-profile:v', '5',  
+        '-pix_fmt', 'yuv444p12le',  
+        '-vendor', 'apl0',  
         '-color_primaries', 'bt709',
         '-color_trc', 'bt709',
         '-colorspace', 'bt709',
-        '-color_range', 'tv',  # Limited range (16-235, standard for video)
-        
-        # Quality settings (max out)
+        '-color_range', 'tv',  
         '-bits_per_mb', '8192',
-        '-quant_mat', 'hq',  # Highest quality quantization matrix
-        
-        # MOV container settings
+        '-quant_mat', 'hq',  
         '-movflags', '+write_colr+faststart',
-        '-write_tmcd', '0',  # no timecode track
-        
-        output_path  # Output
+        '-write_tmcd', '0',  
+        output_path  
     ]
     
-    # If we have a reference video, copy its exact color properties
     if reference_video:
         probe_cmd = [
             'ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -143,7 +129,6 @@ def save_video_highest_quality(frames, output_path, fps, reference_video=None):
         if result.returncode == 0:
             ref_info = json.loads(result.stdout)['streams'][0]
             
-            # Update command with reference color properties
             for key, flag in [
                 ('color_primaries', '-color_primaries'),
                 ('color_transfer', '-color_trc'),
@@ -154,18 +139,15 @@ def save_video_highest_quality(frames, output_path, fps, reference_video=None):
                     idx = cmd.index(flag)
                     cmd[idx + 1] = ref_info[key]
     
-    # Run FFmpeg with piped input (capture stderr only, as stdout isn't needed)
     print(f"Encoding to ProRes 4444 XQ (max quality mode) via direct pipe...")
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     
     try:
         for frame in tqdm(frames):
-            # Write raw RGB bytes (frames are uint8 RGB)
             proc.stdin.write(frame.tobytes())
         
         proc.stdin.close()
         
-        # Wait for completion
         returncode = proc.wait()
         
         if returncode != 0:
@@ -179,7 +161,6 @@ def save_video_highest_quality(frames, output_path, fps, reference_video=None):
     
     print(f"Saved {output_path} with maximum quality")
 
-# resize frames
 def resize_frames(frames, size=None):    
     if size is not None:
         out_size = size
@@ -193,8 +174,6 @@ def resize_frames(frames, size=None):
         
     return frames, process_size, out_size
 
-
-#  read frames from video or PNG folder
 def read_frame_from_videos(frame_root):
     if os.path.isdir(frame_root):
         frames = []
@@ -211,8 +190,6 @@ def read_frame_from_videos(frame_root):
 
     return frames, size
   
-  
-# read frame-wise masks from video or PNG folder
 def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
     masks_img = []
     masks_dilated = []
@@ -262,7 +239,6 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
 
     return flow_masks, masks_dilated
 
-
 def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=-1):
     ref_index = []
     if ref_num == -1:
@@ -279,100 +255,7 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
                 ref_index.append(i)
     return ref_index
 
-
-
-if __name__ == '__main__':
-    device = get_device()
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '-i', '--video', type=str, default='inputs/object_removal/bmx-trees', help='Path of the input video or image folder.')
-    parser.add_argument(
-        '-m', '--mask', type=str, default='inputs/object_removal/bmx-trees_mask', help='Path of the mask(s) or mask folder.')
-    parser.add_argument(
-        '-o', '--output', type=str, default='results/output.mov', help='Path to the output video file.')
-    parser.add_argument(
-        "--resize_ratio", type=float, default=1.0, help='Resize scale for processing video.')
-    parser.add_argument(
-        '--height', type=int, default=-1, help='Height of the processing video.')
-    parser.add_argument(
-        '--width', type=int, default=-1, help='Width of the processing video.')
-    parser.add_argument(
-        '--mask_dilation', type=int, default=4, help='Mask dilation for video and flow masking.')
-    parser.add_argument(
-        "--ref_stride", type=int, default=10, help='Stride of global reference frames.')
-    parser.add_argument(
-        "--neighbor_length", type=int, default=10, help='Length of local neighboring frames.')
-    parser.add_argument(
-        "--subvideo_length", type=int, default=80, help='Length of sub-video for long video inference.')
-    parser.add_argument(
-        "--raft_iter", type=int, default=20, help='Iterations for RAFT inference.')
-    parser.add_argument(
-        '--fp16', action='store_true', help='Use fp16 (half precision) during inference. Default: fp32 (single precision).')
-    parser.add_argument(
-        '--save_masked_in', action='store_true', help='Save the masked input video.')
-
-    args = parser.parse_args()
-
-    # Use fp16 precision during inference to reduce running memory cost
-    use_half = True if args.fp16 else False 
-    if device == torch.device('cpu'):
-        use_half = False
-
-    # Warning for fp16
-    if use_half:
-        print("Warning: --fp16 is enabled, which may introduce minor pixel differences due to precision loss. For zero quality loss, run without --fp16.")
-
-    # If input is video, extract to PNG folders
-    input_is_video = not os.path.isdir(args.video)
-    mask_is_video = not os.path.isdir(args.mask)
-
-    temp_dir = tempfile.mkdtemp()
-    input_frames_dir = args.video
-    mask_frames_dir = args.mask
-    fps = 24.0
-    if input_is_video:
-        _, _, _, _, fps = probe_video_info(args.video)
-        input_frames_dir = os.path.join(temp_dir, 'input_frames')
-        os.makedirs(input_frames_dir, exist_ok=True)
-        extract_frames_to_png(args.video, input_frames_dir, is_mask=False)
-    
-    if mask_is_video:
-        mask_frames_dir = os.path.join(temp_dir, 'mask_frames')
-        os.makedirs(mask_frames_dir, exist_ok=True)
-        extract_frames_to_png(args.mask, mask_frames_dir, is_mask=True)
-
-    frames, size = read_frame_from_videos(input_frames_dir)
-    if args.width != -1 and args.height != -1:
-        size = (args.width, args.height)
-    if args.resize_ratio != 1.0:
-        size = (int(args.resize_ratio * size[0]), int(args.resize_ratio * size[1]))
-
-    frames, size, out_size = resize_frames(frames, size)
-    
-    save_root = os.path.dirname(args.output)
-    if not os.path.exists(save_root):
-        os.makedirs(save_root, exist_ok=True)
-
-    inpaint_out_path = args.output
-    masked_in_path = os.path.splitext(args.output)[0] + '_masked.mov'
-
-    frames_len = len(frames)
-    flow_masks, masks_dilated = read_mask(mask_frames_dir, frames_len, size, 
-                                          flow_mask_dilates=args.mask_dilation,
-                                          mask_dilates=args.mask_dilation)
-    w, h = size
-    
-    frames_inp = [np.array(f).astype(np.uint8) for f in frames]
-    frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
-    flow_masks = to_tensors()(flow_masks).unsqueeze(0)
-    masks_dilated = to_tensors()(masks_dilated).unsqueeze(0)
-    frames, flow_masks, masks_dilated = frames.to(device), flow_masks.to(device), masks_dilated.to(device)
-
-    
-    ##############################################
-    # set up RAFT and flow competition model
-    ##############################################
+def load_models(device, use_half=False):
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'raft-things.pth'), 
                                     model_dir='weights', progress=True, file_name=None)
     fix_raft = RAFT_bi(ckpt_path, device)
@@ -385,15 +268,83 @@ if __name__ == '__main__':
     fix_flow_complete.to(device)
     fix_flow_complete.eval()
 
-
-    ##############################################
-    # set up ProPainter model
-    ##############################################
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'ProPainter.pth'), 
                                     model_dir='weights', progress=True, file_name=None)
     model = InpaintGenerator(model_path=ckpt_path).to(device)
     model.eval()
+    
+    if use_half:
+        # Do not convert fix_raft to half, as RAFT should run in fp32
+        fix_flow_complete = fix_flow_complete.half()
+        # Manually convert parameters to half to ensure all are converted
+        for param in fix_flow_complete.parameters():
+            param.data = param.data.half()
+        model = model.half()
+        for param in model.parameters():
+            param.data = param.data.half()
+    
+    return fix_raft, fix_flow_complete, model
 
+def run_inference(video, mask, output, resize_ratio=1.0, height=-1, width=-1, mask_dilation=4, ref_stride=10, 
+                  neighbor_length=10, subvideo_length=80, raft_iter=20, fp16=False, save_masked_in=False, models=None):
+    device = get_device()
+    use_half = fp16
+    if device == torch.device('cpu'):
+        use_half = False
+    
+    if use_half:
+        print("Warning: fp16 is enabled, which may introduce minor pixel differences due to precision loss. For zero quality loss, run without fp16.")
+    
+    fix_raft, fix_flow_complete, model = models
+    
+    # If input is video, extract to PNG folders
+    input_is_video = not os.path.isdir(video)
+    mask_is_video = not os.path.isdir(mask)
+
+    temp_dir = tempfile.mkdtemp()
+    input_frames_dir = video
+    mask_frames_dir = mask
+    fps = 24.0
+    if input_is_video:
+        _, _, _, _, fps = probe_video_info(video)
+        input_frames_dir = os.path.join(temp_dir, 'input_frames')
+        os.makedirs(input_frames_dir, exist_ok=True)
+        extract_frames_to_png(video, input_frames_dir, is_mask=False)
+    
+    if mask_is_video:
+        mask_frames_dir = os.path.join(temp_dir, 'mask_frames')
+        os.makedirs(mask_frames_dir, exist_ok=True)
+        extract_frames_to_png(mask, mask_frames_dir, is_mask=True)
+
+    frames, size = read_frame_from_videos(input_frames_dir)
+
+    if width != -1 and height != -1:
+        size = (width, height)
+    if resize_ratio != 1.0:
+        size = (int(resize_ratio * size[0]), int(resize_ratio * size[1]))
+
+    frames, size, out_size = resize_frames(frames, size)
+    
+    save_root = os.path.dirname(output)
+    if not os.path.exists(save_root):
+        os.makedirs(save_root, exist_ok=True)
+
+    inpaint_out_path = output
+    masked_in_path = os.path.splitext(output)[0] + '_masked.mov'
+
+    frames_len = len(frames)
+
+    flow_masks, masks_dilated = read_mask(mask_frames_dir, frames_len, size, 
+                                          flow_mask_dilates=mask_dilation,
+                                          mask_dilates=mask_dilation)
+
+    w, h = size
+    
+    frames_inp = [np.array(f).astype(np.uint8) for f in frames]
+    frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
+    flow_masks = to_tensors()(flow_masks).unsqueeze(0)
+    masks_dilated = to_tensors()(masks_dilated).unsqueeze(0)
+    frames, flow_masks, masks_dilated = frames.to(device), flow_masks.to(device), masks_dilated.to(device)
     
     ##############################################
     # ProPainter inference
@@ -411,15 +362,14 @@ if __name__ == '__main__':
         else:
             short_clip_len = 2
         
-        # use fp32 for RAFT
-        if frames.size(1) > short_clip_len:
+        if video_length > short_clip_len:
             gt_flows_f_list, gt_flows_b_list = [], []
             for f in range(0, video_length, short_clip_len):
                 end_f = min(video_length, f + short_clip_len)
                 if f == 0:
-                    flows_f, flows_b = fix_raft(frames[:,f:end_f], iters=args.raft_iter)
+                    flows_f, flows_b = fix_raft(frames[:,f:end_f], iters=raft_iter)
                 else:
-                    flows_f, flows_b = fix_raft(frames[:,f-1:end_f], iters=args.raft_iter)
+                    flows_f, flows_b = fix_raft(frames[:,f-1:end_f], iters=raft_iter)
                 
                 gt_flows_f_list.append(flows_f)
                 gt_flows_b_list.append(flows_b)
@@ -429,27 +379,25 @@ if __name__ == '__main__':
             gt_flows_b = torch.cat(gt_flows_b_list, dim=1)
             gt_flows_bi = (gt_flows_f, gt_flows_b)
         else:
-            gt_flows_bi = fix_raft(frames, iters=args.raft_iter)
+            gt_flows_bi = fix_raft(frames, iters=raft_iter)
             torch.cuda.empty_cache()
 
-
         if use_half:
-            frames, flow_masks, masks_dilated = frames.half(), flow_masks.half(), masks_dilated.half()
+            frames = frames.half()
+            flow_masks = flow_masks.half()
+            masks_dilated = masks_dilated.half()
             gt_flows_bi = (gt_flows_bi[0].half(), gt_flows_bi[1].half())
-            fix_flow_complete = fix_flow_complete.half()
-            model = model.half()
-
         
         # ---- complete flow ----
         flow_length = gt_flows_bi[0].size(1)
-        if flow_length > args.subvideo_length:
+        if flow_length > subvideo_length:
             pred_flows_f, pred_flows_b = [], []
             pad_len = 5
-            for f in range(0, flow_length, args.subvideo_length):
+            for f in range(0, flow_length, subvideo_length):
                 s_f = max(0, f - pad_len)
-                e_f = min(flow_length, f + args.subvideo_length + pad_len)
+                e_f = min(flow_length, f + subvideo_length + pad_len)
                 pad_len_s = max(0, f) - s_f
-                pad_len_e = e_f - min(flow_length, f + args.subvideo_length)
+                pad_len_e = e_f - min(flow_length, f + subvideo_length)
                 pred_flows_bi_sub, _ = fix_flow_complete.forward_bidirect_flow(
                     (gt_flows_bi[0][:, s_f:e_f], gt_flows_bi[1][:, s_f:e_f]), 
                     flow_masks[:, s_f:e_f+1])
@@ -470,10 +418,9 @@ if __name__ == '__main__':
             pred_flows_bi = fix_flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, flow_masks)
             torch.cuda.empty_cache()
             
-
         # ---- image propagation ----
         masked_frames = frames * (1 - masks_dilated)
-        subvideo_length_img_prop = min(100, args.subvideo_length) # ensure a minimum of 100 frames for image propagation
+        subvideo_length_img_prop = min(100, subvideo_length)  # ensure a minimum of 100 frames for image propagation
         if video_length > subvideo_length_img_prop:
             updated_frames, updated_masks = [], []
             pad_len = 10
@@ -510,9 +457,9 @@ if __name__ == '__main__':
     ori_frames = frames_inp
     comp_frames = [None] * video_length
 
-    neighbor_stride = args.neighbor_length // 2
-    if video_length > args.subvideo_length:
-        ref_num = args.subvideo_length // args.ref_stride
+    neighbor_stride = neighbor_length // 2
+    if video_length > subvideo_length:
+        ref_num = subvideo_length // ref_stride
     else:
         ref_num = -1
     
@@ -522,14 +469,13 @@ if __name__ == '__main__':
             i for i in range(max(0, f - neighbor_stride),
                                 min(video_length, f + neighbor_stride + 1))
         ]
-        ref_ids = get_ref_index(f, neighbor_ids, video_length, args.ref_stride, ref_num)
+        ref_ids = get_ref_index(f, neighbor_ids, video_length, ref_stride, ref_num)
         selected_imgs = updated_frames[:, neighbor_ids + ref_ids, :, :, :]
         selected_masks = masks_dilated[:, neighbor_ids + ref_ids, :, :, :]
         selected_update_masks = updated_masks[:, neighbor_ids + ref_ids, :, :, :]
         selected_pred_flows_bi = (pred_flows_bi[0][:, neighbor_ids[:-1], :, :, :], pred_flows_bi[1][:, neighbor_ids[:-1], :, :, :])
         
         with torch.no_grad():
-            # 1.0 indicates mask
             l_t = len(neighbor_ids)
             
             pred_img = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
@@ -553,15 +499,15 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
     comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
+
     save_video_highest_quality(
         comp_frames, 
         inpaint_out_path,
         fps=fps,
-        reference_video=args.video
+        reference_video=video
     )
 
-    if args.save_masked_in:
-        # for saving the masked frames or video
+    if save_masked_in:
         masked_frame_for_save = []
         for i in range(len(frames_inp)):
             mask_ = np.expand_dims(masks_dilated[0, i, 0].cpu().numpy(), axis=-1).repeat(3, axis=-1)
@@ -574,14 +520,54 @@ if __name__ == '__main__':
             masked_frame_for_save.append(fuse_img.clip(0, 255).astype(np.uint8))
 
         masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
+
         save_video_highest_quality(
             masked_frame_for_save,
             masked_in_path,
             fps=fps,
-            reference_video=args.video
+            reference_video=video
         )
     
     print(f'\nAll results are saved in {save_root}')
     
     torch.cuda.empty_cache()
+
     shutil.rmtree(temp_dir)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', '--video', type=str, default='inputs/object_removal/bmx-trees', help='Path of the input video or image folder.')
+    parser.add_argument('-m', '--mask', type=str, default='inputs/object_removal/bmx-trees_mask', help='Path of the mask(s) or mask folder.')
+    parser.add_argument('-o', '--output', type=str, default='results/output.mov', help='Path to the output video file.')
+    parser.add_argument("--resize_ratio", type=float, default=1.0, help='Resize scale for processing video.')
+    parser.add_argument('--height', type=int, default=-1, help='Height of the processing video.')
+    parser.add_argument('--width', type=int, default=-1, help='Width of the processing video.')
+    parser.add_argument('--mask_dilation', type=int, default=4, help='Mask dilation for video and flow masking.')
+    parser.add_argument("--ref_stride", type=int, default=10, help='Stride of global reference frames.')
+    parser.add_argument("--neighbor_length", type=int, default=10, help='Length of local neighboring frames.')
+    parser.add_argument("--subvideo_length", type=int, default=80, help='Length of sub-video for long video inference.')
+    parser.add_argument("--raft_iter", type=int, default=20, help='Iterations for RAFT inference.')
+    parser.add_argument('--fp16', action='store_true', help='Use fp16 (half precision) during inference. Default: fp32 (single precision).')
+    parser.add_argument('--save_masked_in', action='store_true', help='Save the masked input video.')
+
+    args = parser.parse_args()
+
+    device = get_device()
+    models = load_models(device, args.fp16)
+    
+    run_inference(
+        video=args.video,
+        mask=args.mask,
+        output=args.output,
+        resize_ratio=args.resize_ratio,
+        height=args.height,
+        width=args.width,
+        mask_dilation=args.mask_dilation,
+        ref_stride=args.ref_stride,
+        neighbor_length=args.neighbor_length,
+        subvideo_length=args.subvideo_length,
+        raft_iter=args.raft_iter,
+        fp16=args.fp16,
+        save_masked_in=args.save_masked_in,
+        models=models
+    )
