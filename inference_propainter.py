@@ -2,125 +2,182 @@
 import os
 import cv2
 import argparse
-import imageio
 import numpy as np
 import scipy.ndimage
 from PIL import Image
 from tqdm import tqdm
-
+import tempfile
+import subprocess
+import json
+import shutil
 import torch
 import torchvision
-
 from model.modules.flow_comp_raft import RAFT_bi
 from model.recurrent_flow_completion import RecurrentFlowCompleteNet
 from model.propainter import InpaintGenerator
 from utils.download_util import load_file_from_url
 from core.utils import to_tensors
 from model.misc import get_device
-
 import warnings
 warnings.filterwarnings("ignore")
+from pathlib import Path
 
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
-def save_video_highest_quality(frames, output_path, fps, reference_video=None):
-    """Save video with maximum quality preservation using FFmpeg directly"""
-    import tempfile
-    import subprocess
-    import shutil
-    import os
+def probe_video_info(video_path):
+    probe_cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries,r_frame_rate',
+        '-of', 'json', video_path
+    ]
+    result = subprocess.run(probe_cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        ref_info = json.loads(result.stdout)['streams'][0]
+        color_range = ref_info.get('color_range', 'tv')
+        color_space = ref_info.get('color_space', 'bt709')
+        color_transfer = ref_info.get('color_transfer', 'bt709')
+        color_primaries = ref_info.get('color_primaries', 'bt709')
+        r_frame_rate = ref_info.get('r_frame_rate', '24/1')
+        fps = eval(r_frame_rate)  # e.g., 25/1 -> 25.0
+        return color_range, color_space, color_transfer, color_primaries, fps
+    return 'tv', 'bt709', 'bt709', 'bt709', 24.0
+
+def extract_frames_to_png(video_path, output_dir, is_mask=False):
+    """Extract video to lossless PNG frames using FFmpeg"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
     
-    # Create temp directory
-    temp_dir = tempfile.mkdtemp()
+    # Base command for lossless PNG extraction
+    cmd = [
+        'ffmpeg', '-i', str(video_path),
+        '-f', 'image2',
+        '-c:v', 'png',
+        '-q:v', '0',
+        '-bitexact'
+    ]
+    
+    pattern = 'mask_%06d.png' if is_mask else 'frame_%06d.png'
+    
+    if is_mask:
+        cmd += ['-pix_fmt', 'gray']
+    else:
+        if os.path.isfile(video_path):
+            color_range, color_space, color_transfer, color_primaries, _ = probe_video_info(video_path)
+        else:
+            color_range, color_space, color_transfer, color_primaries = 'tv', 'bt709', 'bt709', 'bt709'
+        
+        cmd += ['-vf', f'scale=in_range={color_range}:out_range=full,format=rgb24']
+        cmd += ['-colorspace', color_space, '-color_trc', color_transfer, '-color_primaries', color_primaries]
+    
+    cmd += [str(output_dir / pattern)]
+    cmd += ['-y']  # Overwrite
+    
+    # print(f"Extracting frames: {' '.join(cmd)}")
+    
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace'
+    )
+    
+    if result.returncode != 0:
+        print(f"FFmpeg extraction error: {result.stderr}")
+        raise RuntimeError("Frame extraction failed")
+    
+    extracted_files = list(output_dir.glob('*.png'))
+    # print(f"Extracted {len(extracted_files)} frames to {output_dir}")
+    return len(extracted_files)
+
+def save_video_highest_quality(frames, output_path, fps, reference_video=None):
+    """Save video with maximum quality preservation using FFmpeg with direct piping"""
+    
+    if not frames:
+        raise ValueError("No frames to save")
+    
+    # Get dimensions from first frame
+    h, w, _ = frames[0].shape
+    
+    # Build FFmpeg command with stdin input
+    cmd = [
+        'ffmpeg', '-y',
+        # Input settings (raw RGB from stdin)
+        '-f', 'rawvideo',
+        '-pix_fmt', 'rgb24',
+        '-s', f'{w}x{h}',
+        '-r', str(fps),
+        '-i', '-',  # Read from stdin
+        
+        # Encoder settings
+        '-c:v', 'prores_ks',
+        '-profile:v', '5',  # ProRes 4444 XQ
+        '-pix_fmt', 'yuv444p12le',  # 12-bit YUV
+        '-vendor', 'apl0',  # Apple-compatible
+        
+        # Color management
+        '-color_primaries', 'bt709',
+        '-color_trc', 'bt709',
+        '-colorspace', 'bt709',
+        '-color_range', 'tv',  # Limited range (16-235, standard for video)
+        
+        # Quality settings (max out)
+        '-bits_per_mb', '8192',
+        '-quant_mat', 'hq',  # Highest quality quantization matrix
+        
+        # MOV container settings
+        '-movflags', '+write_colr+faststart',
+        '-write_tmcd', '0',  # no timecode track
+        
+        output_path  # Output
+    ]
+    
+    # If we have a reference video, copy its exact color properties
+    if reference_video:
+        probe_cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries',
+            '-of', 'json', reference_video
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            ref_info = json.loads(result.stdout)['streams'][0]
+            
+            # Update command with reference color properties
+            for key, flag in [
+                ('color_primaries', '-color_primaries'),
+                ('color_transfer', '-color_trc'),
+                ('color_space', '-colorspace'),
+                ('color_range', '-color_range')
+            ]:
+                if key in ref_info:
+                    idx = cmd.index(flag)
+                    cmd[idx + 1] = ref_info[key]
+    
+    # Run FFmpeg with piped input (capture stderr only, as stdout isn't needed)
+    print(f"Encoding to ProRes 4444 XQ (max quality mode) via direct pipe...")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     
     try:
-        # Save frames as 16-bit PNG for even better quality
-        print("Saving frames as 16-bit PNGs...")
-        for i, frame in enumerate(tqdm(frames)):
-            # Convert to 16-bit to preserve more color information
-            frame_16bit = (frame.astype(np.float32) * 257).astype(np.uint16)
-            
-            # Save as 16-bit PNG (completely lossless)
-            png_path = os.path.join(temp_dir, f'frame_{i:06d}.png')
-            cv2.imwrite(png_path, cv2.cvtColor(frame_16bit, cv2.COLOR_RGB2BGR), 
-                       [cv2.IMWRITE_PNG_COMPRESSION, 0])  # No compression
+        for frame in tqdm(frames):
+            # Write raw RGB bytes (frames are uint8 RGB)
+            proc.stdin.write(frame.tobytes())
         
-        # Build FFmpeg command with maximum quality settings
-        cmd = [
-            'ffmpeg', '-y',
-            # Input settings
-            '-framerate', str(fps),
-            '-i', os.path.join(temp_dir, 'frame_%06d.png'),
-            '-pix_fmt', 'rgb48le',  # Read as 16-bit RGB
-            
-            # ProRes 4444 settings
-            '-c:v', 'prores_ks',
-            '-profile:v', '4',  # ProRes 4444
-            '-pix_fmt', 'yuv444p10le',  # 10-bit 4:4:4
-            '-vendor', 'ap10',
-            
-            # Color management
-            '-color_primaries', 'bt709',
-            '-color_trc', 'bt709',
-            '-colorspace', 'bt709',
-            '-color_range', 'tv',  # Limited range (16-235)
-            
-            # Quality settings
-            '-bits_per_mb', '8000',
-            '-quant_mat', 'proxy',  # Best quality matrix
-            
-            # MOV container settings
-            '-movflags', '+write_colr+faststart',
-            '-write_tmcd', '0',  # No timecode track
-            
-            # Output
-            output_path
-        ]
+        proc.stdin.close()
         
-        # If we have a reference video, copy its exact color properties
-        if reference_video:
-            # Extract color properties from reference
-            probe_cmd = [
-                'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries',
-                '-of', 'json', reference_video
-            ]
-            result = subprocess.run(probe_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                import json
-                ref_info = json.loads(result.stdout)['streams'][0]
-                
-                # Update command with reference color properties
-                for key, flag in [
-                    ('color_primaries', '-color_primaries'),
-                    ('color_transfer', '-color_trc'),
-                    ('color_space', '-colorspace'),
-                    ('color_range', '-color_range')
-                ]:
-                    if key in ref_info:
-                        idx = cmd.index(flag)
-                        cmd[idx + 1] = ref_info[key]
+        # Wait for completion
+        returncode = proc.wait()
         
-        # Run FFmpeg
-        print("Encoding to ProRes 4444...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print(f"FFmpeg error: {result.stderr}")
+        if returncode != 0:
+            stderr = proc.stderr.read().decode()
+            print(f"FFmpeg error: {stderr}")
             raise RuntimeError("FFmpeg encoding failed")
-            
     finally:
-        # Clean up temp files
-        shutil.rmtree(temp_dir)
+        proc.stderr.close()
+        if proc.poll() is None:
+            proc.terminate()
     
     print(f"Saved {output_path} with maximum quality")
-    
-def imwrite(img, file_path, params=None, auto_mkdir=True):
-    if auto_mkdir:
-        dir_name = os.path.abspath(os.path.dirname(file_path))
-        os.makedirs(dir_name, exist_ok=True)
-    return cv2.imwrite(file_path, img, params)
-
 
 # resize frames
 def resize_frames(frames, size=None):    
@@ -137,115 +194,73 @@ def resize_frames(frames, size=None):
     return frames, process_size, out_size
 
 
-#  read frames from video
+#  read frames from video or PNG folder
 def read_frame_from_videos(frame_root):
-    if frame_root.endswith(('mp4', 'mov', 'avi', 'MP4', 'MOV', 'AVI')): # input video path
-        video_name = os.path.basename(frame_root)[:-4]
-        vframes, aframes, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec') # RGB
-        frames = list(vframes.numpy())
-        frames = [Image.fromarray(f) for f in frames]
-        fps = info['video_fps']
-    else:
-        video_name = os.path.basename(frame_root)
+    if os.path.isdir(frame_root):
         frames = []
         fr_lst = sorted(os.listdir(frame_root))
         for fr in fr_lst:
             frame = cv2.imread(os.path.join(frame_root, fr))
             frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             frames.append(frame)
-        fps = None
+    else:
+        vframes, aframes, info = torchvision.io.read_video(filename=frame_root, pts_unit='sec') # RGB
+        frames = list(vframes.numpy())
+        frames = [Image.fromarray(f) for f in frames]
     size = frames[0].size
 
-    return frames, fps, size, video_name
-
-
-def binary_mask(mask, th=0.1):
-    mask[mask>th] = 1
-    mask[mask<=th] = 0
-    return mask
+    return frames, size
   
   
-# read frame-wise masks
+# read frame-wise masks from video or PNG folder
 def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
     masks_img = []
     masks_dilated = []
     flow_masks = []
     
-    if mpath.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')): # input single img path
-       masks_img = [Image.open(mpath)]
-    else:  
+    if os.path.isdir(mpath):
         mnames = sorted(os.listdir(mpath))
         for mp in mnames:
             masks_img.append(Image.open(os.path.join(mpath, mp)))
+    elif mpath.endswith(('jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG')): # input single img path
+       masks_img = [Image.open(mpath)]
+    else:
+        # Extract from video
+        temp_mask_dir = tempfile.mkdtemp()
+        extract_frames_to_png(mpath, temp_mask_dir, is_mask=True)
+        mnames = sorted(os.listdir(temp_mask_dir))
+        for mp in mnames:
+            masks_img.append(Image.open(os.path.join(temp_mask_dir, mp)))
           
+    th = 127  # Adjusted threshold for binarization
+    
     for mask_img in masks_img:
         if size is not None:
             mask_img = mask_img.resize(size, Image.NEAREST)
         mask_img = np.array(mask_img.convert('L'))
+        
+        # Binarize the mask first with the adjusted threshold
+        bin_mask = (mask_img > th).astype(np.uint8)
 
-        # Dilate 8 pixel so that all known pixel is trustworthy
+        # For flow masks
         if flow_mask_dilates > 0:
-            flow_mask_img = scipy.ndimage.binary_dilation(mask_img, iterations=flow_mask_dilates).astype(np.uint8)
+            flow_mask_img = scipy.ndimage.binary_dilation(bin_mask, iterations=flow_mask_dilates).astype(np.uint8)
         else:
-            flow_mask_img = binary_mask(mask_img).astype(np.uint8)
-        # Close the small holes inside the foreground objects
-        # flow_mask_img = cv2.morphologyEx(flow_mask_img, cv2.MORPH_CLOSE, np.ones((21, 21),np.uint8)).astype(bool)
-        # flow_mask_img = scipy.ndimage.binary_fill_holes(flow_mask_img).astype(np.uint8)
+            flow_mask_img = bin_mask
         flow_masks.append(Image.fromarray(flow_mask_img * 255))
         
+        # For dilated masks
         if mask_dilates > 0:
-            mask_img = scipy.ndimage.binary_dilation(mask_img, iterations=mask_dilates).astype(np.uint8)
+            mask_img_dil = scipy.ndimage.binary_dilation(bin_mask, iterations=mask_dilates).astype(np.uint8)
         else:
-            mask_img = binary_mask(mask_img).astype(np.uint8)
-        masks_dilated.append(Image.fromarray(mask_img * 255))
+            mask_img_dil = bin_mask
+        masks_dilated.append(Image.fromarray(mask_img_dil * 255))
     
-    if len(masks_img) == 1:
+    if len(masks_img) ==1:
         flow_masks = flow_masks * length
         masks_dilated = masks_dilated * length
 
     return flow_masks, masks_dilated
-
-
-def extrapolation(video_ori, scale):
-    """Prepares the data for video outpainting.
-    """
-    nFrame = len(video_ori)
-    imgW, imgH = video_ori[0].size
-
-    # Defines new FOV.
-    imgH_extr = int(scale[0] * imgH)
-    imgW_extr = int(scale[1] * imgW)
-    imgH_extr = imgH_extr - imgH_extr % 8
-    imgW_extr = imgW_extr - imgW_extr % 8
-    H_start = int((imgH_extr - imgH) / 2)
-    W_start = int((imgW_extr - imgW) / 2)
-
-    # Extrapolates the FOV for video.
-    frames = []
-    for v in video_ori:
-        frame = np.zeros(((imgH_extr, imgW_extr, 3)), dtype=np.uint8)
-        frame[H_start: H_start + imgH, W_start: W_start + imgW, :] = v
-        frames.append(Image.fromarray(frame))
-
-    # Generates the mask for missing region.
-    masks_dilated = []
-    flow_masks = []
-    
-    dilate_h = 4 if H_start > 10 else 0
-    dilate_w = 4 if W_start > 10 else 0
-    mask = np.ones(((imgH_extr, imgW_extr)), dtype=np.uint8)
-    
-    mask[H_start+dilate_h: H_start+imgH-dilate_h, 
-         W_start+dilate_w: W_start+imgW-dilate_w] = 0
-    flow_masks.append(Image.fromarray(mask * 255))
-
-    mask[H_start: H_start+imgH, W_start: W_start+imgW] = 0
-    masks_dilated.append(Image.fromarray(mask * 255))
-  
-    flow_masks = flow_masks * nFrame
-    masks_dilated = masks_dilated * nFrame
-    
-    return frames, flow_masks, masks_dilated, (imgW_extr, imgH_extr)
 
 
 def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=-1):
@@ -267,7 +282,6 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
 
 
 if __name__ == '__main__':
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = get_device()
     
     parser = argparse.ArgumentParser()
@@ -276,7 +290,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '-m', '--mask', type=str, default='inputs/object_removal/bmx-trees_mask', help='Path of the mask(s) or mask folder.')
     parser.add_argument(
-        '-o', '--output', type=str, default='results', help='Output folder. Default: results')
+        '-o', '--output', type=str, default='results/output.mov', help='Path to the output video file.')
     parser.add_argument(
         "--resize_ratio", type=float, default=1.0, help='Resize scale for processing video.')
     parser.add_argument(
@@ -294,17 +308,9 @@ if __name__ == '__main__':
     parser.add_argument(
         "--raft_iter", type=int, default=20, help='Iterations for RAFT inference.')
     parser.add_argument(
-        '--mode', default='video_inpainting', choices=['video_inpainting', 'video_outpainting'], help="Modes: video_inpainting / video_outpainting")
-    parser.add_argument(
-        '--scale_h', type=float, default=1.0, help='Outpainting scale of height for video_outpainting mode.')
-    parser.add_argument(
-        '--scale_w', type=float, default=1.2, help='Outpainting scale of width for video_outpainting mode.')
-    parser.add_argument(
-        '--save_fps', type=int, default=24, help='Frame per second. Default: 24')
-    parser.add_argument(
-        '--save_frames', action='store_true', help='Save output frames. Default: False')
-    parser.add_argument(
         '--fp16', action='store_true', help='Use fp16 (half precision) during inference. Default: fp32 (single precision).')
+    parser.add_argument(
+        '--save_masked_in', action='store_true', help='Save the masked input video.')
 
     args = parser.parse_args()
 
@@ -313,45 +319,50 @@ if __name__ == '__main__':
     if device == torch.device('cpu'):
         use_half = False
 
-    frames, fps, size, video_name = read_frame_from_videos(args.video)
-    if not args.width == -1 and not args.height == -1:
+    # Warning for fp16
+    if use_half:
+        print("Warning: --fp16 is enabled, which may introduce minor pixel differences due to precision loss. For zero quality loss, run without --fp16.")
+
+    # If input is video, extract to PNG folders
+    input_is_video = not os.path.isdir(args.video)
+    mask_is_video = not os.path.isdir(args.mask)
+
+    temp_dir = tempfile.mkdtemp()
+    input_frames_dir = args.video
+    mask_frames_dir = args.mask
+    fps = 24.0
+    if input_is_video:
+        _, _, _, _, fps = probe_video_info(args.video)
+        input_frames_dir = os.path.join(temp_dir, 'input_frames')
+        os.makedirs(input_frames_dir, exist_ok=True)
+        extract_frames_to_png(args.video, input_frames_dir, is_mask=False)
+    
+    if mask_is_video:
+        mask_frames_dir = os.path.join(temp_dir, 'mask_frames')
+        os.makedirs(mask_frames_dir, exist_ok=True)
+        extract_frames_to_png(args.mask, mask_frames_dir, is_mask=True)
+
+    frames, size = read_frame_from_videos(input_frames_dir)
+    if args.width != -1 and args.height != -1:
         size = (args.width, args.height)
-    if not args.resize_ratio == 1.0:
+    if args.resize_ratio != 1.0:
         size = (int(args.resize_ratio * size[0]), int(args.resize_ratio * size[1]))
 
     frames, size, out_size = resize_frames(frames, size)
     
-    fps = args.save_fps if fps is None else fps
-    save_root = os.path.join(args.output, video_name)
+    save_root = os.path.dirname(args.output)
     if not os.path.exists(save_root):
         os.makedirs(save_root, exist_ok=True)
 
-    if args.mode == 'video_inpainting':
-        frames_len = len(frames)
-        flow_masks, masks_dilated = read_mask(args.mask, frames_len, size, 
-                                              flow_mask_dilates=args.mask_dilation,
-                                              mask_dilates=args.mask_dilation)
-        w, h = size
-    elif args.mode == 'video_outpainting':
-        assert args.scale_h is not None and args.scale_w is not None, 'Please provide a outpainting scale (s_h, s_w).'
-        frames, flow_masks, masks_dilated, size = extrapolation(frames, (args.scale_h, args.scale_w))
-        w, h = size
-    else:
-        raise NotImplementedError
-    
-    # for saving the masked frames or video
-    masked_frame_for_save = []
-    for i in range(len(frames)):
-        mask_ = np.expand_dims(np.array(masks_dilated[i]),2).repeat(3, axis=2)/255.
-        img = np.array(frames[i])
-        green = np.zeros([h, w, 3]) 
-        green[:,:,1] = 255
-        alpha = 0.6
-        # alpha = 1.0
-        fuse_img = (1-alpha)*img + alpha*green
-        fuse_img = mask_ * fuse_img + (1-mask_)*img
-        masked_frame_for_save.append(fuse_img.astype(np.uint8))
+    inpaint_out_path = args.output
+    masked_in_path = os.path.splitext(args.output)[0] + '_masked.mov'
 
+    frames_len = len(frames)
+    flow_masks, masks_dilated = read_mask(mask_frames_dir, frames_len, size, 
+                                          flow_mask_dilates=args.mask_dilation,
+                                          mask_dilates=args.mask_dilation)
+    w, h = size
+    
     frames_inp = [np.array(f).astype(np.uint8) for f in frames]
     frames = to_tensors()(frames).unsqueeze(0) * 2 - 1    
     flow_masks = to_tensors()(flow_masks).unsqueeze(0)
@@ -388,7 +399,7 @@ if __name__ == '__main__':
     # ProPainter inference
     ##############################################
     video_length = frames.size(1)
-    print(f'\nProcessing: {video_name} [{video_length} frames]...')
+    print(f'\nProcessing [{video_length} frames]...')
     with torch.no_grad():
         # ---- compute flow ----
         if frames.size(-1) <= 640: 
@@ -521,7 +532,6 @@ if __name__ == '__main__':
             # 1.0 indicates mask
             l_t = len(neighbor_ids)
             
-            # pred_img = selected_imgs # results of image propagation
             pred_img = model(selected_imgs, selected_pred_flows_bi, selected_masks, selected_update_masks, l_t)
             
             pred_img = pred_img.view(-1, 3, h, w)
@@ -537,45 +547,41 @@ if __name__ == '__main__':
                 if comp_frames[idx] is None:
                     comp_frames[idx] = img
                 else: 
-                    comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
-                    
-                comp_frames[idx] = comp_frames[idx].astype(np.uint8)
+                    comp_frames[idx] = (comp_frames[idx].astype(np.uint16) + img.astype(np.uint16)) // 2
+                    comp_frames[idx] = comp_frames[idx].astype(np.uint8)
         
         torch.cuda.empty_cache()
-                
-    # save each frame
-    if args.save_frames:
-        for idx in range(video_length):
-            f = comp_frames[idx]
-            f = cv2.resize(f, out_size, interpolation = cv2.INTER_CUBIC)
-            f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-            img_save_root = os.path.join(save_root, 'frames', str(idx).zfill(4)+'.png')
-            imwrite(f, img_save_root)
-                    
 
-    # if args.mode == 'video_outpainting':
-    #     comp_frames = [i[10:-10,10:-10] for i in comp_frames]
-    #     masked_frame_for_save = [i[10:-10,10:-10] for i in masked_frame_for_save]
-    
-    # save videos frame
-    masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
     comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
-    # imageio.mimwrite(os.path.join(save_root, 'masked_in.mp4'), masked_frame_for_save, fps=fps, quality=7)
-    # imageio.mimwrite(os.path.join(save_root, 'inpaint_out.mp4'), comp_frames, fps=fps, quality=7)# Use high-quality FFmpeg encoding
     save_video_highest_quality(
         comp_frames, 
-        os.path.join(save_root, 'inpaint_out.mov'),
+        inpaint_out_path,
         fps=fps,
         reference_video=args.video
     )
-    
-    save_video_highest_quality(
-        masked_frame_for_save,
-        os.path.join(save_root, 'masked_in.mov'),
-        fps=fps,
-        reference_video=args.video
-    )
+
+    if args.save_masked_in:
+        # for saving the masked frames or video
+        masked_frame_for_save = []
+        for i in range(len(frames_inp)):
+            mask_ = np.expand_dims(masks_dilated[0, i, 0].cpu().numpy(), axis=-1).repeat(3, axis=-1)
+            img = frames_inp[i].astype(np.float32)
+            green = np.zeros([h, w, 3], dtype=np.float32) 
+            green[:,:,1] = 255.0
+            alpha = 0.6
+            fuse_img = (1 - alpha) * img + alpha * green
+            fuse_img = mask_ * fuse_img + (1 - mask_) * img
+            masked_frame_for_save.append(fuse_img.clip(0, 255).astype(np.uint8))
+
+        masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
+        save_video_highest_quality(
+            masked_frame_for_save,
+            masked_in_path,
+            fps=fps,
+            reference_video=args.video
+        )
     
     print(f'\nAll results are saved in {save_root}')
     
     torch.cuda.empty_cache()
+    shutil.rmtree(temp_dir)
