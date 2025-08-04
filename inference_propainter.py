@@ -266,22 +266,17 @@ def load_models(device, use_half=False):
     for p in fix_flow_complete.parameters():
         p.requires_grad = False
     fix_flow_complete.to(device)
+    if use_half:
+        fix_flow_complete = fix_flow_complete.half()
     fix_flow_complete.eval()
 
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'ProPainter.pth'), 
                                     model_dir='weights', progress=True, file_name=None)
-    model = InpaintGenerator(model_path=ckpt_path).to(device)
-    model.eval()
-    
+    model = InpaintGenerator(model_path=ckpt_path)
+    model.to(device)
     if use_half:
-        # Do not convert fix_raft to half, as RAFT should run in fp32
-        fix_flow_complete = fix_flow_complete.half()
-        # Manually convert parameters to half to ensure all are converted
-        for param in fix_flow_complete.parameters():
-            param.data = param.data.half()
         model = model.half()
-        for param in model.parameters():
-            param.data = param.data.half()
+    model.eval()
     
     return fix_raft, fix_flow_complete, model
 
@@ -333,10 +328,21 @@ def run_inference(video, mask, output, resize_ratio=1.0, height=-1, width=-1, ma
     masked_in_path = os.path.splitext(output)[0] + '_masked.mov'
 
     frames_len = len(frames)
+    print(f"Extracted {frames_len} frames from input.")
 
     flow_masks, masks_dilated = read_mask(mask_frames_dir, frames_len, size, 
                                           flow_mask_dilates=mask_dilation,
                                           mask_dilates=mask_dilation)
+    masks_len = len(masks_dilated)
+    print(f"Extracted {masks_len} masks from input.")
+
+    if masks_len != frames_len and masks_len != 1:
+        if masks_len > frames_len:
+            print(f"Warning: Truncating masks from {masks_len} to {frames_len} to match frames.")
+            flow_masks = flow_masks[:frames_len]
+            masks_dilated = masks_dilated[:frames_len]
+        else:
+            raise ValueError(f"Mask count ({masks_len}) must match frame count ({frames_len}) or be 1 (static mask). Provide matching inputs.")
 
     w, h = size
     
