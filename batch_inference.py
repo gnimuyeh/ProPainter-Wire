@@ -7,7 +7,7 @@ import time
 from inference_propainter import load_models, run_inference, get_device
 
 BAIDU_PCS = "/workspace/BaiduPCS-Go-v3.9.7-linux-amd64/BaiduPCS-Go"
-REMOTE_FOLDER = "/我的资源/20250802"
+REMOTE_FOLDER = "/我的资源/sc"
 LOCAL_INPUT_DIR = "/workspace/workdata/input_videos"
 LOCAL_OUTPUT_DIR = "/workspace/workdata/propainter_results"
 
@@ -32,14 +32,12 @@ for file in all_files:
     basename, ext = os.path.splitext(file)
     mask_name = f"{basename}_mask{ext}"
     result_name = f"{basename}_result{ext}"
-    result_name_check = f"{basename}_pnt_v002{ext}"
 
     input_path = os.path.join(LOCAL_INPUT_DIR, file)
     mask_path = os.path.join(LOCAL_INPUT_DIR, mask_name)
     output_path = os.path.join(LOCAL_OUTPUT_DIR, result_name)
-    output_path_check = os.path.join(LOCAL_OUTPUT_DIR, result_name_check)
 
-    if os.path.exists(output_path_check):
+    if os.path.exists(output_path):
         print(f"✅ Skipping {file} — local result exists.")
         continue
 
@@ -88,9 +86,9 @@ for file in all_files:
     video_end = time.time()
     print(f"Processing time for {file}: {video_end - video_start:.2f} seconds")
 
-    # # Upload
-    # print(f"📤 Uploading {result_name}...")
-    # subprocess.run([BAIDU_PCS, "upload", output_path, REMOTE_FOLDER], check=True)
+    # Upload
+    print(f"📤 Uploading {result_name}...")
+    subprocess.run([BAIDU_PCS, "upload", output_path, REMOTE_FOLDER], check=True)
 
     # # Cleanup
     # os.remove(input_path)
