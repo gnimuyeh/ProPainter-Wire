@@ -25,22 +25,109 @@ from pathlib import Path
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
 def probe_video_info(video_path):
+    """Probe video for color and profile info"""
     probe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-        '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries,r_frame_rate',
+        '-show_entries', 'stream=codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries,r_frame_rate',
         '-of', 'json', video_path
     ]
     result = subprocess.run(probe_cmd, capture_output=True, text=True)
     if result.returncode == 0:
         ref_info = json.loads(result.stdout)['streams'][0]
+
         color_range = ref_info.get('color_range', 'tv')
         color_space = ref_info.get('color_space', 'bt709')
         color_transfer = ref_info.get('color_transfer', 'bt709')
         color_primaries = ref_info.get('color_primaries', 'bt709')
         r_frame_rate = ref_info.get('r_frame_rate', '24/1')
-        fps = eval(r_frame_rate)  # e.g., 25/1 -> 25.0
-        return color_range, color_space, color_transfer, color_primaries, fps
-    return 'tv', 'bt709', 'bt709', 'bt709', 24.0
+        fps = eval(r_frame_rate)
+
+        codec_tag = ref_info.get('codec_tag_string', 'ap4h')
+        pix_fmt = ref_info.get('pix_fmt', 'yuv444p10le')
+
+        codec_tag_to_profile = {
+            'apco': '0', 'apcs': '1', 'apcn': '2', 'apch': '3', 'ap4h': '4', 'ap4x': '5'
+        }
+        profile = codec_tag_to_profile.get(codec_tag, '4')
+
+        print(f"Detected: codec_tag={codec_tag} -> profile={profile}, color_transfer={color_transfer}")
+        return color_range, color_space, color_transfer, color_primaries, fps, profile, pix_fmt
+
+    # fallback defaults
+    return 'tv', 'bt709', 'bt709', 'bt709', 24.0, '4', 'yuv444p10le'
+
+
+def save_video_highest_quality(frames, output_path, fps, reference_video=None):
+    """Save video preserving pixel data and matching input color space and profile"""
+    if not frames:
+        raise ValueError("No frames to save")
+
+    h, w, _ = frames[0].shape
+
+    # default ProRes 4444 XQ settings (we will override below)
+    cmd = [
+        'ffmpeg', '-y',
+        '-f', 'rawvideo',
+        '-pix_fmt', 'rgb24',
+        '-s', f'{w}x{h}',
+        '-r', str(fps),
+        '-i', '-',
+        '-c:v', 'prores_ks',
+        '-profile:v', '5',
+        '-pix_fmt', 'yuv444p12le',
+        '-vendor', 'apl0',
+        '-color_primaries', 'bt709',
+        '-color_trc', 'bt709',
+        '-colorspace', 'bt709',
+        '-color_range', 'tv',
+        '-movflags', '+write_colr+faststart',
+        '-write_tmcd', '0',
+        output_path
+    ]
+
+    # If reference video provided, override defaults to match input
+    if reference_video and os.path.isfile(reference_video):
+        color_range, color_space, color_transfer, color_primaries, _, profile, pix_fmt = probe_video_info(reference_video)
+        print(f"Matching input: profile={profile}, color_transfer={color_transfer}")
+
+        # Replace default cmd args
+        replacements = {
+            '-profile:v': profile,
+            '-pix_fmt': pix_fmt,
+            '-color_primaries': color_primaries,
+            '-color_trc': color_transfer,
+            '-colorspace': color_space,
+            '-color_range': color_range
+        }
+        for i, arg in enumerate(cmd):
+            if arg in replacements:
+                cmd[i + 1] = replacements[arg]
+
+        # Remove XQ-only options if not using profile 5
+        if profile != '5':
+            for i, arg in enumerate(cmd):
+                if arg == '-movflags':
+                    # keep +write_colr+faststart but remove extra flags if needed
+                    cmd[i + 1] = '+write_colr+faststart'
+                    break
+
+    print(f"Final FFmpeg settings: profile={cmd[cmd.index('-profile:v') + 1]}, color_trc={cmd[cmd.index('-color_trc') + 1]}")
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for frame in tqdm(frames):
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        returncode = proc.wait()
+        if returncode != 0:
+            stderr = proc.stderr.read().decode()
+            raise RuntimeError(f"FFmpeg failed: {stderr}")
+    finally:
+        proc.stderr.close()
+        if proc.poll() is None:
+            proc.terminate()
+
+    print(f"Saved {output_path} with matching profile and color space")
 
 def extract_frames_to_png(video_path, output_dir, is_mask=False):
     """Extract video to lossless PNG frames using FFmpeg"""
@@ -62,7 +149,7 @@ def extract_frames_to_png(video_path, output_dir, is_mask=False):
         cmd += ['-pix_fmt', 'gray']
     else:
         if os.path.isfile(video_path):
-            color_range, color_space, color_transfer, color_primaries, _ = probe_video_info(video_path)
+            color_range, color_space, color_transfer, color_primaries, _, _, _ = probe_video_info(video_path)
         else:
             color_range, color_space, color_transfer, color_primaries = 'tv', 'bt709', 'bt709', 'bt709'
         
@@ -86,80 +173,6 @@ def extract_frames_to_png(video_path, output_dir, is_mask=False):
     
     extracted_files = list(output_dir.glob('*.png'))
     return len(extracted_files)
-
-def save_video_highest_quality(frames, output_path, fps, reference_video=None):
-    """Save video with maximum quality preservation using FFmpeg with direct piping"""
-    
-    if not frames:
-        raise ValueError("No frames to save")
-    
-    # Get dimensions from first frame
-    h, w, _ = frames[0].shape
-    
-    # Build FFmpeg command with stdin input
-    cmd = [
-        'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-pix_fmt', 'rgb24',
-        '-s', f'{w}x{h}',
-        '-r', str(fps),
-        '-i', '-',  
-        '-c:v', 'prores_ks',
-        '-profile:v', '5',  
-        '-pix_fmt', 'yuv444p12le',  
-        '-vendor', 'apl0',  
-        '-color_primaries', 'bt709',
-        '-color_trc', 'bt709',
-        '-colorspace', 'bt709',
-        '-color_range', 'tv',  
-        '-bits_per_mb', '8192',
-        '-quant_mat', 'hq',  
-        '-movflags', '+write_colr+faststart',
-        '-write_tmcd', '0',  
-        output_path  
-    ]
-    
-    if reference_video:
-        probe_cmd = [
-            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-            '-show_entries', 'stream=color_range,color_space,color_transfer,color_primaries',
-            '-of', 'json', reference_video
-        ]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            ref_info = json.loads(result.stdout)['streams'][0]
-            
-            for key, flag in [
-                ('color_primaries', '-color_primaries'),
-                ('color_transfer', '-color_trc'),
-                ('color_space', '-colorspace'),
-                ('color_range', '-color_range')
-            ]:
-                if key in ref_info:
-                    idx = cmd.index(flag)
-                    cmd[idx + 1] = ref_info[key]
-    
-    print(f"Encoding to ProRes 4444 XQ (max quality mode) via direct pipe...")
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    try:
-        for frame in tqdm(frames):
-            proc.stdin.write(frame.tobytes())
-        
-        proc.stdin.close()
-        
-        returncode = proc.wait()
-        
-        if returncode != 0:
-            stderr = proc.stderr.read().decode()
-            print(f"FFmpeg error: {stderr}")
-            raise RuntimeError("FFmpeg encoding failed")
-    finally:
-        proc.stderr.close()
-        if proc.poll() is None:
-            proc.terminate()
-    
-    print(f"Saved {output_path} with maximum quality")
 
 def resize_frames(frames, size=None):    
     if size is not None:
@@ -301,7 +314,7 @@ def run_inference(video, mask, output, resize_ratio=1.0, height=-1, width=-1, ma
     mask_frames_dir = mask
     fps = 24.0
     if input_is_video:
-        _, _, _, _, fps = probe_video_info(video)
+        _, _, _, _, fps, _, _ = probe_video_info(video)
         input_frames_dir = os.path.join(temp_dir, 'input_frames')
         os.makedirs(input_frames_dir, exist_ok=True)
         extract_frames_to_png(video, input_frames_dir, is_mask=False)
