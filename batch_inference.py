@@ -88,7 +88,7 @@ for file in all_files:
 
     # Upload
     print(f"📤 Uploading {result_name}...")
-    subprocess.run([BAIDU_PCS, "upload", output_path, REMOTE_FOLDER], check=True)
+    subprocess.run([BAIDU_PCS, "upload", "--nooverwrite=false", output_path, REMOTE_FOLDER], check=True)
 
     # # Cleanup
     # os.remove(input_path)
