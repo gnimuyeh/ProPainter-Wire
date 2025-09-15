@@ -25,10 +25,14 @@ from pathlib import Path
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
 def probe_video_info(video_path):
-    """Probe video for color and profile info"""
+    """Probe video and return (color_range, color_space, color_transfer, color_primaries, fps, prores_profile_num, pix_fmt).
+
+    - Robustly reads ffprobe JSON fields.
+    - Tries a few fallbacks and normalizes common transfer names (gamma22 → bt709 for Rec.709 files).
+    """
     probe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-        '-show_entries', 'stream=codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries,r_frame_rate',
+        '-show_entries', 'stream=codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries,r_frame_rate,profile',
         '-of', 'json', video_path
     ]
     result = subprocess.run(probe_cmd, capture_output=True, text=True)
@@ -40,17 +44,49 @@ def probe_video_info(video_path):
         color_transfer = ref_info.get('color_transfer', 'bt709')
         color_primaries = ref_info.get('color_primaries', 'bt709')
         r_frame_rate = ref_info.get('r_frame_rate', '24/1')
-        fps = eval(r_frame_rate)
+        try:
+            fps = eval(r_frame_rate)
+        except Exception:
+            fps = 24.0
 
-        codec_tag = ref_info.get('codec_tag_string', 'ap4h')
+        codec_tag = (ref_info.get('codec_tag_string') or '').lower()
         pix_fmt = ref_info.get('pix_fmt', 'yuv444p10le')
+        profile_field = (ref_info.get('profile') or '').lower()
 
+        # Map common codec_tag values to prores_ks -profile:v integers.
         codec_tag_to_profile = {
-            'apco': '0', 'apcs': '1', 'apcn': '2', 'apch': '3', 'ap4h': '4', 'ap4x': '5'
+            'apco': '0',  # proxy (422)
+            'apcs': '1',  # lt (422)
+            'apcn': '2',  # standard (422)
+            'apch': '3',  # hq (422)
+            'ap4h': '4',  # 4444
+            'ap4x': '5',  # 4444 XQ
         }
-        profile = codec_tag_to_profile.get(codec_tag, '4')
 
-        print(f"Detected: codec_tag={codec_tag} -> profile={profile}, color_transfer={color_transfer}")
+        if codec_tag in codec_tag_to_profile:
+            profile = codec_tag_to_profile[codec_tag]
+        else:
+            # If ffprobe provides "profile" text, try to infer
+            if '4444 xq' in profile_field or 'xq' in profile_field:
+                profile = '5'
+            elif '4444' in profile_field:
+                profile = '4'
+            else:
+                # default to 4 (ProRes 4444) — safer than always forcing XQ
+                profile = '4'
+
+        # Normalize some transfer names that ffprobe sometimes emits (eg. 'gamma22')
+        # If it's a 'gammaXX' form and primaries/colorspace indicate bt709, set transfer to bt709.
+        transfer_l = (color_transfer or '').lower()
+        if transfer_l.startswith('gamma'):
+            if 'bt709' in (color_primaries or '').lower() or 'bt709' in (color_space or '').lower():
+                color_transfer = 'bt709'
+            else:
+                # fallback to bt709 — change this if you have other known source types
+                color_transfer = 'bt709'
+
+        # Final values (return)
+        print(f"Detected codec_tag={codec_tag} -> profile={profile}, pix_fmt={pix_fmt}, color_trc={color_transfer}")
         return color_range, color_space, color_transfer, color_primaries, fps, profile, pix_fmt
 
     # fallback defaults
@@ -58,60 +94,88 @@ def probe_video_info(video_path):
 
 
 def save_video_highest_quality(frames, output_path, fps, reference_video=None):
-    """Save video preserving pixel data and matching input color space and profile"""
+    """Save frames to ProRes MOV while forcing encoder settings to match reference.
+    - Builds the ffmpeg command from probed values (no brittle list replace).
+    - Ensures prores_metadata bitstream filter is applied to write MOV color atoms.
+    """
     if not frames:
         raise ValueError("No frames to save")
 
     h, w, _ = frames[0].shape
 
-    # default ProRes 4444 XQ settings (we will override below)
+    # Defaults (safe)
+    color_range = 'tv'
+    color_space = 'bt709'
+    color_transfer = 'bt709'
+    color_primaries = 'bt709'
+    profile = '5'       # default to XQ only if we truly have no reference (will be overridden)
+    pix_fmt = 'yuv444p12le'
+
+    # If reference provided and valid, probe it and adopt those parameters
+    if reference_video and os.path.isfile(reference_video):
+        color_range, color_space, color_transfer, color_primaries, _, profile, pix_fmt = probe_video_info(reference_video)
+        print(f"Matching input format: ProRes profile {profile}, Color transfer: {color_transfer}, pix_fmt: {pix_fmt}")
+
+    # Normalize pix_fmt to a commonly supported prores_ks pix_fmt if needed:
+    # prefer 10-bit variants when available; prores_ks commonly uses yuva444p10le/ yuv444p10le
+    if '12' in pix_fmt:
+        # ffmpeg often writes 10-bit; force to 10-bit 444 unless you explicitly need 12-bit pipeline
+        pix_fmt = pix_fmt.replace('12', '10')
+
+    # Build ffmpeg cmd with explicit metadata + prores_metadata bitstream filter
     cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo',
         '-pix_fmt', 'rgb24',
         '-s', f'{w}x{h}',
         '-r', str(fps),
-        '-i', '-',
+        '-i', '-',  # read raw frames from stdin
         '-c:v', 'prores_ks',
-        '-profile:v', '5',
-        '-pix_fmt', 'yuv444p12le',
+        '-profile:v', str(profile),
+        '-pix_fmt', pix_fmt,
         '-vendor', 'apl0',
-        '-color_primaries', 'bt709',
-        '-color_trc', 'bt709',
-        '-colorspace', 'bt709',
-        '-color_range', 'tv',
+        '-color_primaries', color_primaries,
+        '-color_trc', color_transfer,
+        '-colorspace', color_space,
+        '-color_range', color_range,
+        '-bits_per_mb', '8192',
+        '-quant_mat', 'hq',
         '-movflags', '+write_colr+faststart',
         '-write_tmcd', '0',
-        output_path
     ]
 
-    # If reference video provided, override defaults to match input
-    if reference_video and os.path.isfile(reference_video):
-        color_range, color_space, color_transfer, color_primaries, _, profile, pix_fmt = probe_video_info(reference_video)
-        print(f"Matching input: profile={profile}, color_transfer={color_transfer}")
-
-        # Replace default cmd args
-        replacements = {
-            '-profile:v': profile,
-            '-pix_fmt': pix_fmt,
-            '-color_primaries': color_primaries,
-            '-color_trc': color_transfer,
-            '-colorspace': color_space,
-            '-color_range': color_range
-        }
+    # Adjust quality settings based on profile (4444 vs XQ etc.)
+    if str(profile) == '4':  # 4444
+        # reduce bits_per_mb for regular 4444
         for i, arg in enumerate(cmd):
-            if arg in replacements:
-                cmd[i + 1] = replacements[arg]
+            if arg == '-bits_per_mb':
+                cmd[i + 1] = '4096'
+                break
+        # remove quant_mat if you prefer default
+        if '-quant_mat' in cmd:
+            idx = cmd.index('-quant_mat')
+            # remove flag and its value
+            cmd.pop(idx)
+            cmd.pop(idx)
 
-        # Remove XQ-only options if not using profile 5
-        if profile != '5':
-            for i, arg in enumerate(cmd):
-                if arg == '-movflags':
-                    # keep +write_colr+faststart but remove extra flags if needed
-                    cmd[i + 1] = '+write_colr+faststart'
-                    break
+    elif str(profile) == '3':  # HQ
+        for i, arg in enumerate(cmd):
+            if arg == '-bits_per_mb':
+                cmd[i + 1] = '2048'
+                break
+        if '-quant_mat' in cmd:
+            idx = cmd.index('-quant_mat')
+            cmd.pop(idx)
+            cmd.pop(idx)
 
-    print(f"Final FFmpeg settings: profile={cmd[cmd.index('-profile:v') + 1]}, color_trc={cmd[cmd.index('-color_trc') + 1]}")
+    # Force the prores_metadata bsf so the MOV/ProRes atoms contain the correct color metadata
+    prores_bsf = f"prores_metadata=color_primaries={color_primaries}:color_trc={color_transfer}:colorspace={color_space}"
+    cmd += ['-bsf:v', prores_bsf]
+
+    # Output path at the end
+    cmd += [output_path]
+
+    print(f"Final settings: Profile {profile}, Color TRC {color_transfer}, BSF={prores_bsf}")
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -121,13 +185,14 @@ def save_video_highest_quality(frames, output_path, fps, reference_video=None):
         returncode = proc.wait()
         if returncode != 0:
             stderr = proc.stderr.read().decode()
-            raise RuntimeError(f"FFmpeg failed: {stderr}")
+            print(f"FFmpeg error: {stderr}")
+            raise RuntimeError("FFmpeg encoding failed")
     finally:
         proc.stderr.close()
         if proc.poll() is None:
             proc.terminate()
 
-    print(f"Saved {output_path} with matching profile and color space")
+    print(f"Saved {output_path} with matched format and color metadata")
 
 def extract_frames_to_png(video_path, output_dir, is_mask=False):
     """Extract video to lossless PNG frames using FFmpeg"""
