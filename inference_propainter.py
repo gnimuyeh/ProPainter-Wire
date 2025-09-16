@@ -25,11 +25,7 @@ from pathlib import Path
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
 def probe_video_info(video_path):
-    """Probe video and return (color_range, color_space, color_transfer, color_primaries, fps, prores_profile_num, pix_fmt).
-
-    - Robustly reads ffprobe JSON fields.
-    - Tries a few fallbacks and normalizes common transfer names (gamma22 → bt709 for Rec.709 files).
-    """
+    """Probe video and return (color_range, color_space, color_transfer, color_primaries, fps, prores_profile_num, pix_fmt)."""
     probe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 'v:0',
         '-show_entries', 'stream=codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries,r_frame_rate,profile',
@@ -53,146 +49,72 @@ def probe_video_info(video_path):
         pix_fmt = ref_info.get('pix_fmt', 'yuv444p10le')
         profile_field = (ref_info.get('profile') or '').lower()
 
-        # Map common codec_tag values to prores_ks -profile:v integers.
         codec_tag_to_profile = {
-            'apco': '0',  # proxy (422)
-            'apcs': '1',  # lt (422)
-            'apcn': '2',  # standard (422)
-            'apch': '3',  # hq (422)
-            'ap4h': '4',  # 4444
-            'ap4x': '5',  # 4444 XQ
+            'apco': '0', 'apcs': '1', 'apcn': '2', 'apch': '3', 'ap4h': '4', 'ap4x': '5',
         }
 
-        if codec_tag in codec_tag_to_profile:
-            profile = codec_tag_to_profile[codec_tag]
-        else:
-            # If ffprobe provides "profile" text, try to infer
-            if '4444 xq' in profile_field or 'xq' in profile_field:
-                profile = '5'
-            elif '4444' in profile_field:
-                profile = '4'
-            else:
-                # default to 4 (ProRes 4444) — safer than always forcing XQ
-                profile = '4'
+        profile = codec_tag_to_profile.get(codec_tag, '4')
 
-        # Normalize some transfer names that ffprobe sometimes emits (eg. 'gamma22')
-        # If it's a 'gammaXX' form and primaries/colorspace indicate bt709, set transfer to bt709.
         transfer_l = (color_transfer or '').lower()
         if transfer_l.startswith('gamma'):
-            if 'bt709' in (color_primaries or '').lower() or 'bt709' in (color_space or '').lower():
-                color_transfer = 'bt709'
-            else:
-                # fallback to bt709 — change this if you have other known source types
-                color_transfer = 'bt709'
+            color_transfer = 'bt709'
 
-        # Final values (return)
         print(f"Detected codec_tag={codec_tag} -> profile={profile}, pix_fmt={pix_fmt}, color_trc={color_transfer}")
         return color_range, color_space, color_transfer, color_primaries, fps, profile, pix_fmt
 
-    # fallback defaults
     return 'tv', 'bt709', 'bt709', 'bt709', 24.0, '4', 'yuv444p10le'
 
-
-def save_video_highest_quality(frames, output_path, fps, reference_video=None):
-    """Save frames to ProRes MOV while forcing encoder settings to match reference.
-    - Builds the ffmpeg command from probed values (no brittle list replace).
-    - Ensures prores_metadata bitstream filter is applied to write MOV color atoms.
-    """
+def save_video_highest_quality(frames, output_path, fps, reference_video=None, original_frames=None, masks=None):
     if not frames:
         raise ValueError("No frames to save")
 
     h, w, _ = frames[0].shape
+    n_frames = len(frames)
 
-    # Defaults (safe)
-    color_range = 'tv'
-    color_space = 'bt709'
-    color_transfer = 'bt709'
-    color_primaries = 'bt709'
-    profile = '5'       # default to XQ only if we truly have no reference (will be overridden)
-    pix_fmt = 'yuv444p12le'
-
-    # If reference provided and valid, probe it and adopt those parameters
     if reference_video and os.path.isfile(reference_video):
-        color_range, color_space, color_transfer, color_primaries, _, profile, pix_fmt = probe_video_info(reference_video)
-        print(f"Matching input format: ProRes profile {profile}, Color transfer: {color_transfer}, pix_fmt: {pix_fmt}")
+        color_range, color_space, color_transfer, color_primaries, _, profile, _ = probe_video_info(reference_video)
+    else:
+        color_range, color_space, color_transfer, color_primaries = 'tv','bt709','bt709','bt709'
 
-    # Normalize pix_fmt to a commonly supported prores_ks pix_fmt if needed:
-    # prefer 10-bit variants when available; prores_ks commonly uses yuva444p10le/ yuv444p10le
-    if '12' in pix_fmt:
-        # ffmpeg often writes 10-bit; force to 10-bit 444 unless you explicitly need 12-bit pipeline
-        pix_fmt = pix_fmt.replace('12', '10')
+    profile = '4'
+    pix_fmt = 'yuv444p10le'
 
-    # Build ffmpeg cmd with explicit metadata + prores_metadata bitstream filter
+    if original_frames is not None and masks is not None:
+        if not (len(original_frames) == len(masks) == n_frames):
+            raise ValueError(f"Length mismatch: frames={n_frames}, original_frames={len(original_frames)}, masks={len(masks)}")
+        blended_frames = []
+        for f, orig, mask in zip(frames, original_frames, masks):
+            mask_bool = mask.astype(bool)
+            frame_copy = orig.copy()
+            frame_copy[mask_bool] = f[mask_bool]
+            blended_frames.append(frame_copy)
+        frames_to_write = blended_frames
+    else:
+        frames_to_write = frames
+
     cmd = [
         'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-pix_fmt', 'rgb24',
-        '-s', f'{w}x{h}',
-        '-r', str(fps),
-        '-i', '-',  # read raw frames from stdin
-        '-c:v', 'prores_ks',
-        '-profile:v', str(profile),
-        '-pix_fmt', pix_fmt,
-        '-vendor', 'apl0',
-        '-color_primaries', color_primaries,
-        '-color_trc', color_transfer,
-        '-colorspace', color_space,
-        '-color_range', color_range,
-        '-bits_per_mb', '8192',
-        '-quant_mat', 'hq',
-        '-movflags', '+write_colr+faststart',
-        '-write_tmcd', '0',
+        '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+        '-s', f'{w}x{h}', '-r', str(fps), '-i', '-',
+        '-c:v', 'prores_ks', '-profile:v', profile, '-pix_fmt', pix_fmt, '-vendor', 'apl0',
+        '-color_primaries', color_primaries, '-color_trc', color_transfer, '-colorspace', color_space,
+        '-movflags', '+write_colr+faststart', output_path
     ]
-
-    # Adjust quality settings based on profile (4444 vs XQ etc.)
-    if str(profile) == '4':  # 4444
-        # reduce bits_per_mb for regular 4444
-        for i, arg in enumerate(cmd):
-            if arg == '-bits_per_mb':
-                cmd[i + 1] = '4096'
-                break
-        # remove quant_mat if you prefer default
-        if '-quant_mat' in cmd:
-            idx = cmd.index('-quant_mat')
-            # remove flag and its value
-            cmd.pop(idx)
-            cmd.pop(idx)
-
-    elif str(profile) == '3':  # HQ
-        for i, arg in enumerate(cmd):
-            if arg == '-bits_per_mb':
-                cmd[i + 1] = '2048'
-                break
-        if '-quant_mat' in cmd:
-            idx = cmd.index('-quant_mat')
-            cmd.pop(idx)
-            cmd.pop(idx)
-
-    # Force the prores_metadata bsf so the MOV/ProRes atoms contain the correct color metadata
-    prores_bsf = f"prores_metadata=color_primaries={color_primaries}:color_trc={color_transfer}:colorspace={color_space}"
-    cmd += ['-bsf:v', prores_bsf]
-
-    # Output path at the end
-    cmd += [output_path]
-
-    print(f"Final settings: Profile {profile}, Color TRC {color_transfer}, BSF={prores_bsf}")
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        for frame in tqdm(frames):
+        for frame in tqdm(frames_to_write):
             proc.stdin.write(frame.tobytes())
         proc.stdin.close()
         returncode = proc.wait()
         if returncode != 0:
             stderr = proc.stderr.read().decode()
-            print(f"FFmpeg error: {stderr}")
-            raise RuntimeError("FFmpeg encoding failed")
+            raise RuntimeError(f"FFmpeg encoding failed: {stderr}")
     finally:
         proc.stderr.close()
         if proc.poll() is None:
             proc.terminate()
-
-    print(f"Saved {output_path} with matched format and color metadata")
+    print(f"Saved {output_path} as ProRes 4444 with NCLC metadata and pixel-perfect blending")
 
 def extract_frames_to_png(video_path, output_dir, is_mask=False):
     """Extract video to lossless PNG frames using FFmpeg"""
@@ -584,33 +506,35 @@ def run_inference(video, mask, output, resize_ratio=1.0, height=-1, width=-1, ma
 
     comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
 
+    # --- At final save ---
+    comp_frames_uint8 = [np.clip(f, 0, 255).astype(np.uint8) for f in comp_frames]
+    frames_inp_uint8 = [np.clip(f, 0, 255).astype(np.uint8) for f in frames_inp]
+    masks_dilated_uint8 = [(masks_dilated[0, i, 0].cpu().numpy() > 0).astype(np.uint8) for i in range(video_length)]
+    
+    assert len(comp_frames_uint8) == len(frames_inp_uint8) == len(masks_dilated_uint8)
+    
     save_video_highest_quality(
-        comp_frames, 
-        inpaint_out_path,
+        frames=comp_frames_uint8,
+        output_path=inpaint_out_path,
         fps=fps,
-        reference_video=video
+        reference_video=video,
+        original_frames=frames_inp_uint8,
+        masks=masks_dilated_uint8
     )
-
+    
+    # Masked preview
     if save_masked_in:
-        masked_frame_for_save = []
-        for i in range(len(frames_inp)):
-            mask_ = np.expand_dims(masks_dilated[0, i, 0].cpu().numpy(), axis=-1).repeat(3, axis=-1)
+        masked_frames = []
+        for i in range(video_length):
+            mask_bool = masks_dilated[0, i, 0].cpu().numpy() > 0
             img = frames_inp[i].astype(np.float32)
-            green = np.zeros([h, w, 3], dtype=np.float32) 
+            green = np.zeros_like(img)
             green[:,:,1] = 255.0
             alpha = 0.6
-            fuse_img = (1 - alpha) * img + alpha * green
-            fuse_img = mask_ * fuse_img + (1 - mask_) * img
-            masked_frame_for_save.append(fuse_img.clip(0, 255).astype(np.uint8))
-
-        masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
-
-        save_video_highest_quality(
-            masked_frame_for_save,
-            masked_in_path,
-            fps=fps,
-            reference_video=video
-        )
+            fuse_img = (1-alpha)*img + alpha*green
+            fuse_img[mask_bool] = fuse_img[mask_bool]
+            masked_frames.append(fuse_img.clip(0,255).astype(np.uint8))
+        save_video_highest_quality(masked_frames, masked_in_path, fps=fps, reference_video=video)
     
     print(f'\nAll results are saved in {save_root}')
     
