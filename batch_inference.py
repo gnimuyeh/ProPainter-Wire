@@ -16,7 +16,7 @@ os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
 
 # Load models once
 device = get_device()
-models = load_models(device, use_half=False)  # Set use_half=True if desired; fp16=False by default
+models = load_models(device, False) 
 
 # Get file list once
 print(f"📁 Listing files in {REMOTE_FOLDER}...")
@@ -31,7 +31,7 @@ for file in all_files:
 
     basename, ext = os.path.splitext(file)
     mask_name = f"{basename}_mask{ext}"
-    result_name = f"{basename}_result{ext}"
+    result_name = f"{basename}_result"
 
     input_path = os.path.join(LOCAL_INPUT_DIR, file)
     mask_path = os.path.join(LOCAL_INPUT_DIR, mask_name)
@@ -78,8 +78,9 @@ for file in all_files:
         ref_stride=5,
         mask_dilation=0,
         neighbor_length=10,
-        fp16=False,  # Set to True if desired
-        save_masked_in=False,
+        fp16=False,  # Set to True if desired,
+        output_video=False,
+        save_metadata=False,
         models=models
     )
 
@@ -87,8 +88,8 @@ for file in all_files:
     print(f"Processing time for {file}: {video_end - video_start:.2f} seconds")
 
     # Upload
-    print(f"📤 Uploading {result_name}...")
-    subprocess.run([BAIDU_PCS, "upload", "--nooverwrite=false", output_path, REMOTE_FOLDER], check=True)
+    # print(f"📤 Uploading {result_name}...")
+    # subprocess.run([BAIDU_PCS, "upload", output_path, REMOTE_FOLDER], check=True)
 
     # # Cleanup
     # os.remove(input_path)
