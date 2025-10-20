@@ -19,87 +19,81 @@ import warnings
 import av
 import OpenEXR
 import Imath
+import subprocess
 warnings.filterwarnings("ignore")
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
-
 # Mapping for chromaticities based on FFmpeg AVColorPrimaries integer values
 primaries_dict = {
-    1: Imath.Chromaticities(Imath.V2f(0.64, 0.33), Imath.V2f(0.3, 0.6), Imath.V2f(0.15, 0.06), Imath.V2f(0.3127, 0.329)),  # BT709
-    9: Imath.Chromaticities(Imath.V2f(0.708, 0.292), Imath.V2f(0.170, 0.797), Imath.V2f(0.131, 0.046), Imath.V2f(0.3127, 0.329)),  # BT2020
-    6: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.310, 0.595), Imath.V2f(0.155, 0.070), Imath.V2f(0.3127, 0.3290)),  # SMPTE170M
-    5: Imath.Chromaticities(Imath.V2f(0.640, 0.330), Imath.V2f(0.290, 0.600), Imath.V2f(0.150, 0.060), Imath.V2f(0.3127, 0.3290)),  # BT470BG
-    7: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.310, 0.595), Imath.V2f(0.155, 0.070), Imath.V2f(0.3127, 0.3290)),  # SMPTE240M
-    8: Imath.Chromaticities(Imath.V2f(0.681, 0.319), Imath.V2f(0.243, 0.692), Imath.V2f(0.145, 0.049), Imath.V2f(0.3167, 0.3345)),  # FILM
-    10: Imath.Chromaticities(Imath.V2f(0.7347, 0.2653), Imath.V2f(0.0, 1.0), Imath.V2f(0.0001, -0.0770), Imath.V2f(0.32168, 0.33767)),  # SMPTEST428
-    11: Imath.Chromaticities(Imath.V2f(0.680, 0.320), Imath.V2f(0.265, 0.690), Imath.V2f(0.150, 0.060), Imath.V2f(0.314, 0.351)),  # SMPTE431
-    12: Imath.Chromaticities(Imath.V2f(0.680, 0.320), Imath.V2f(0.265, 0.690), Imath.V2f(0.150, 0.060), Imath.V2f(0.3127, 0.3290)),  # SMPTE432
-    22: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.295, 0.605), Imath.V2f(0.155, 0.077), Imath.V2f(0.3127, 0.3290)),  # EBU3213
-    4: Imath.Chromaticities(Imath.V2f(0.67, 0.33), Imath.V2f(0.21, 0.71), Imath.V2f(0.14, 0.08), Imath.V2f(0.310, 0.316)),  # BT470M (added for completeness, as it's in FFmpeg enum)
+    1: Imath.Chromaticities(Imath.V2f(0.64, 0.33), Imath.V2f(0.3, 0.6), Imath.V2f(0.15, 0.06), Imath.V2f(0.3127, 0.329)), # BT709
+    9: Imath.Chromaticities(Imath.V2f(0.708, 0.292), Imath.V2f(0.170, 0.797), Imath.V2f(0.131, 0.046), Imath.V2f(0.3127, 0.329)), # BT2020
+    6: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.310, 0.595), Imath.V2f(0.155, 0.070), Imath.V2f(0.3127, 0.3290)), # SMPTE170M
+    5: Imath.Chromaticities(Imath.V2f(0.640, 0.330), Imath.V2f(0.290, 0.600), Imath.V2f(0.150, 0.060), Imath.V2f(0.3127, 0.3290)), # BT470BG
+    7: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.310, 0.595), Imath.V2f(0.155, 0.070), Imath.V2f(0.3127, 0.3290)), # SMPTE240M
+    8: Imath.Chromaticities(Imath.V2f(0.681, 0.319), Imath.V2f(0.243, 0.692), Imath.V2f(0.145, 0.049), Imath.V2f(0.3167, 0.3345)), # FILM
+    10: Imath.Chromaticities(Imath.V2f(0.7347, 0.2653), Imath.V2f(0.0, 1.0), Imath.V2f(0.0001, -0.0770), Imath.V2f(0.32168, 0.33767)), # SMPTEST428
+    11: Imath.Chromaticities(Imath.V2f(0.680, 0.320), Imath.V2f(0.265, 0.690), Imath.V2f(0.150, 0.060), Imath.V2f(0.314, 0.351)), # SMPTE431
+    12: Imath.Chromaticities(Imath.V2f(0.680, 0.320), Imath.V2f(0.265, 0.690), Imath.V2f(0.150, 0.060), Imath.V2f(0.3127, 0.3290)), # SMPTE432
+    22: Imath.Chromaticities(Imath.V2f(0.630, 0.340), Imath.V2f(0.295, 0.605), Imath.V2f(0.155, 0.077), Imath.V2f(0.3127, 0.3290)), # EBU3213
+    4: Imath.Chromaticities(Imath.V2f(0.67, 0.33), Imath.V2f(0.21, 0.71), Imath.V2f(0.14, 0.08), Imath.V2f(0.310, 0.316)), # BT470M (added for completeness, as it's in FFmpeg enum)
 }
-
 primaries_names = {
-    1: 'BT709',
-    4: 'BT470M',
-    5: 'BT470BG',
-    6: 'SMPTE170M',
-    7: 'SMPTE240M',
-    8: 'FILM',
-    9: 'BT2020',
-    10: 'SMPTEST428',
-    11: 'SMPTE431',
-    12: 'SMPTE432',
-    22: 'EBU3213',
+    1: 'bt709',
+    4: 'bt470m',
+    5: 'bt470bg',
+    6: 'smpte170m',
+    7: 'smpte240m',
+    8: 'film',
+    9: 'bt2020',
+    10: 'smpte428',
+    11: 'smpte431',
+    12: 'smpte432',
+    22: 'jedec-p22',
 }
-
 # Name mappings for custom headers (based on FFmpeg enums)
-color_space_names = {  # AVColorSpace
-    0: 'RGB',
-    1: 'BT709',
-    4: 'FCC',
-    5: 'BT470BG',
-    6: 'SMPTE170M',
-    7: 'SMPTE240M',
-    8: 'YCGCO',
-    9: 'BT2020_NCL',
-    10: 'BT2020_CL',
-    11: 'SMPTE2085',
-    12: 'CHROMA_DERIVED_NCL',
-    13: 'CHROMA_DERIVED_CL',
-    14: 'ICTCP',
+color_space_names = { # AVColorSpace
+    0: 'rgb',
+    1: 'bt709',
+    4: 'fcc',
+    5: 'bt470bg',
+    6: 'smpte170m',
+    7: 'smpte240m',
+    8: 'ycgco',
+    9: 'bt2020nc',
+    10: 'bt2020c',
+    11: 'smpte2085',
+    12: 'chroma-derived-nc',
+    13: 'chroma-derived-c',
+    14: 'ictcp',
 }
-
-transfer_names = {  # AVColorTransferCharacteristic
-    1: 'BT709',
-    4: 'GAMMA22',
-    5: 'GAMMA28',
-    6: 'SMPTE170M',
-    7: 'SMPTE240M',
-    8: 'LINEAR',
-    9: 'LOG',
-    10: 'LOG_SQRT',
-    11: 'IEC61966_2_4',
-    12: 'BT1361_ECG',
-    13: 'IEC61966_2_1',
-    14: 'BT2020_10',
-    15: 'BT2020_12',
-    16: 'SMPTE2084',
-    17: 'SMPTE428',
-    18: 'ARIB_STD_B67',
+transfer_names = { # AVColorTransferCharacteristic
+    1: 'bt709',
+    4: 'gamma22',
+    5: 'gamma28',
+    6: 'smpte170m',
+    7: 'smpte240m',
+    8: 'linear',
+    9: 'log100',
+    10: 'log316',
+    11: 'iec61966-2-4',
+    12: 'bt1361e',
+    13: 'iec61966-2-1',
+    14: 'bt2020-10',
+    15: 'bt2020-12',
+    16: 'smpte2084',
+    17: 'smpte428',
+    18: 'arib-std-b67',
 }
-
-range_names = {  # AVColorRange
-    0: 'unspecified',
-    1: 'MPEG',  # Limited/TV
-    2: 'JPEG',  # Full/PC
+range_names = { # AVColorRange
+    0: 'tv',
+    1: 'tv',
+    2: 'pc',
 }
-
 def get_chromaticities(color_primaries):
     if color_primaries in primaries_dict:
         return primaries_dict[color_primaries]
     else:
         print(f"Unknown or unsupported color primaries {color_primaries}, falling back to BT.709")
         return primaries_dict[1]
-
 def imwrite(img, file_path, params=None, auto_mkdir=True, color_info=None):
     if auto_mkdir:
         dir_name = os.path.abspath(os.path.dirname(file_path))
@@ -113,7 +107,7 @@ def imwrite(img, file_path, params=None, auto_mkdir=True, color_info=None):
     if color_info and color_info['primaries'] is not None:
         header['chromaticities'] = get_chromaticities(color_info['primaries'])
     else:
-        header['chromaticities'] = primaries_dict[1]  # Default to BT.709
+        header['chromaticities'] = primaries_dict[1] # Default to BT.709
     header['whiteLuminance'] = 1.0
     exr = OpenEXR.OutputFile(file_path, header)
     img_half = (img / 65535.0).astype(np.float16)
@@ -125,7 +119,55 @@ def imwrite(img, file_path, params=None, auto_mkdir=True, color_info=None):
         raise ValueError(f"Channel size mismatch: expected {expected_size}, got {len(b)}")
     exr.writePixels({'R': r, 'G': g, 'B': b})
     exr.close()
-
+def save_video_highest_quality(frames, output_path, fps, color_info=None):
+    if not frames:
+        raise ValueError("No frames to save")
+    h, w, _ = frames[0].shape
+    cmd = [
+        'ffmpeg', '-y',
+        '-f', 'rawvideo',
+        '-pix_fmt', 'rgb48le',
+        '-s', f'{w}x{h}',
+        '-r', str(fps),
+        '-i', '-',
+        '-c:v', 'prores_ks',
+        '-profile:v', '5',
+        '-pix_fmt', 'yuv444p12le',
+        '-vendor', 'apl0',
+        '-bits_per_mb', '8000',
+        '-quant_mat', 'hq',
+        '-movflags', '+write_colr+faststart',
+        '-write_tmcd', '0',
+        output_path
+    ]
+    primaries_name = primaries_names.get(color_info['primaries'], 'bt709') if color_info else 'bt709'
+    matrix_name = color_space_names.get(color_info['matrix'], 'bt709') if color_info else 'bt709'
+    transfer_name = transfer_names.get(color_info['transfer'], 'bt709') if color_info else 'bt709'
+    range_name = range_names.get(color_info['range'], 'tv') if color_info else 'tv'
+    cmd.insert(-1, '-color_primaries')
+    cmd.insert(-1, primaries_name)
+    cmd.insert(-1, '-colorspace')
+    cmd.insert(-1, matrix_name)
+    cmd.insert(-1, '-color_trc')
+    cmd.insert(-1, transfer_name)
+    cmd.insert(-1, '-color_range')
+    cmd.insert(-1, range_name)
+    print(f"Encoding to ProRes 4444 XQ (max quality mode) via direct pipe...")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for frame in tqdm(frames):
+            proc.stdin.write(frame.astype(np.uint16).tobytes())
+        proc.stdin.close()
+        returncode = proc.wait()
+        if returncode != 0:
+            stderr = proc.stderr.read().decode()
+            print(f"FFmpeg error: {stderr}")
+            raise RuntimeError("FFmpeg encoding failed")
+    finally:
+        proc.stderr.close()
+        if proc.poll() is None:
+            proc.terminate()
+    print(f"Saved {output_path} with maximum quality")
 def resize_frames(frames, size=None):
     if size is not None:
         out_size = size
@@ -137,7 +179,6 @@ def resize_frames(frames, size=None):
         if not out_size == process_size:
             frames = [cv2.resize(f, process_size, interpolation=cv2.INTER_CUBIC) for f in frames]
     return frames, process_size, out_size
-
 def read_frame_from_videos(frame_root):
     color_info = {'primaries': None, 'matrix': None, 'transfer': None, 'range': None}
     if frame_root.endswith(('mp4', 'mov', 'avi', 'MP4', 'MOV', 'AVI')):
@@ -160,9 +201,9 @@ def read_frame_from_videos(frame_root):
             color_info['primaries'] = 1
             print("No color primaries detected, defaulting to BT.709")
         if color_info['range'] is None or color_info['range'] == 0:
-            video_stream.codec_context.color_range = 2
-            color_info['range'] = 2
-            print("Color range unspecified; assuming full range (JPEG).")
+            video_stream.codec_context.color_range = 1
+            color_info['range'] = 1
+            print("Color range unspecified; assuming limited range (MPEG).")
         print(f"Detected color primaries: {primaries_names.get(color_info['primaries'], 'unknown')} ({color_info['primaries']})")
         print(f"Detected color space/matrix: {color_space_names.get(color_info['matrix'], 'unknown')} ({color_info['matrix']})")
         print(f"Detected transfer: {transfer_names.get(color_info['transfer'], 'unknown')} ({color_info['transfer']})")
@@ -195,14 +236,14 @@ def read_frame_from_videos(frame_root):
         bit_depth = 8
         # For image folders, default to BT.709
         color_info['primaries'] = 1
+        color_info['range'] = 2
         print("Image folder input: Defaulting color primaries to BT.709")
+        print("Image folder input: Defaulting color range to full (JPEG).")
     return frames, frames_pil, fps, size, video_name, color_info
-
 def binary_mask(mask, th=0.1):
     mask[mask>th] = 1
     mask[mask<=th] = 0
     return mask
-
 def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
     masks_img = []
     masks_dilated = []
@@ -216,7 +257,7 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         video_stream = container.streams.video[0]
         for packet in container.demux(video_stream):
             for frame in packet.decode():
-                img = frame.to_ndarray(format='rgb24')  # Read as 8-bit RGB for masks
+                img = frame.to_ndarray(format='rgb24') # Read as 8-bit RGB for masks
                 img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                 masks_img.append(Image.fromarray(img_gray, mode='L'))
         container.close()
@@ -244,7 +285,6 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         flow_masks = flow_masks * length
         masks_dilated = masks_dilated * length
     return flow_masks, masks_dilated
-
 def extrapolation(video_ori, scale):
     nFrame = len(video_ori)
     imgW, imgH = video_ori[0].shape[1], video_ori[0].shape[0]
@@ -272,7 +312,6 @@ def extrapolation(video_ori, scale):
     flow_masks = flow_masks * nFrame
     masks_dilated = masks_dilated * nFrame
     return frames, flow_masks, masks_dilated, (imgW_extr, imgH_extr)
-
 def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=-1):
     ref_index = []
     if ref_num == -1:
@@ -288,12 +327,10 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
                     break
                 ref_index.append(i)
     return ref_index
-
 def load_models(device, use_half=False):
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'raft-things.pth'),
                                     model_dir='weights', progress=True, file_name=None)
     fix_raft = RAFT_bi(ckpt_path, device)
-
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'recurrent_flow_completion.pth'),
                                     model_dir='weights', progress=True, file_name=None)
     fix_flow_complete = RecurrentFlowCompleteNet(ckpt_path)
@@ -301,47 +338,37 @@ def load_models(device, use_half=False):
         p.requires_grad = False
     fix_flow_complete.to(device)
     fix_flow_complete.eval()
-
     ckpt_path = load_file_from_url(url=os.path.join(pretrain_model_url, 'ProPainter.pth'),
                                     model_dir='weights', progress=True, file_name=None)
     model = InpaintGenerator(model_path=ckpt_path).to(device)
     model.eval()
-
     if use_half and device != torch.device('cpu'):
         fix_raft = fix_raft.half()
         fix_flow_complete = fix_flow_complete.half()
         model = model.half()
-
     return {'raft': fix_raft, 'flow_complete': fix_flow_complete, 'model': model}
-
 def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, width=-1, mask_dilation=0,
                   ref_stride=10, neighbor_length=10, subvideo_length=10, raft_iter=50,
                   mode='video_inpainting', scale_h=1.0, scale_w=1.2, save_fps=25,
                   save_frames=True, fp16=False, save_masked_in=False, models=None, device=None):
     if device is None:
         device = get_device()
-
     use_half = fp16 and device != torch.device('cpu')
-
     if models is None:
         models = load_models(device, use_half=use_half)
-
     fix_raft = models['raft']
     fix_flow_complete = models['flow_complete']
     model = models['model']
-
     frames, frames_pil, fps, size, video_name, color_info = read_frame_from_videos(video)
     if width != -1 and height != -1:
         size = (width, height)
     if resize_ratio != 1.0:
         size = (int(resize_ratio * size[0]), int(resize_ratio * size[1]))
     frames, size, out_size = resize_frames(frames, size)
-
     fps = save_fps if fps is None else fps
     save_root = os.path.join(output)
     if not os.path.exists(save_root):
         os.makedirs(save_root, exist_ok=True)
-
     if mode == 'video_inpainting':
         frames_len = len(frames)
         flow_masks, masks_dilated = read_mask(mask, frames_len, size,
@@ -354,29 +381,25 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
         w, h = size
     else:
         raise NotImplementedError
-
     masked_frame_for_save = None
     if not save_frames and save_masked_in:
         masked_frame_for_save = []
         for i in range(len(frames)):
             mask_ = np.expand_dims(np.array(masks_dilated[i]), 2).repeat(3, axis=2) / 255.
-            img = frames[i].astype(np.float32) / 257
+            img = frames[i].astype(np.float32) / 65535.0
             green = np.zeros([h, w, 3])
-            green[:, :, 1] = 255
+            green[:, :, 1] = 1.0
             alpha = 0.6
             fuse_img = (1-alpha) * img + alpha * green
             fuse_img = mask_ * fuse_img + (1-mask_) * img
-            masked_frame_for_save.append((fuse_img * 255).astype(np.uint8))
-
+            masked_frame_for_save.append(np.clip(fuse_img * 65535.0, 0, 65535).astype(np.uint16))
     frames_inp = frames
     frames = to_tensors()(frames_pil).unsqueeze(0) * 2 - 1
     flow_masks = to_tensors()(flow_masks).unsqueeze(0)
     masks_dilated = to_tensors()(masks_dilated).unsqueeze(0)
     frames, flow_masks, masks_dilated = frames.to(device), flow_masks.to(device), masks_dilated.to(device)
-
     video_length = frames.size(1)
     print(f'\nProcessing: {video_name} [{video_length} frames]...')
-
     with torch.no_grad():
         with torch.inference_mode():
             if frames.size(-1) <= 640:
@@ -387,7 +410,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
                 short_clip_len = 4
             else:
                 short_clip_len = 2
-
             if frames.size(1) > short_clip_len:
                 gt_flows_f_list, gt_flows_b_list = [], []
                 for f in range(0, video_length, short_clip_len):
@@ -407,13 +429,11 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
             else:
                 gt_flows_bi = fix_raft(frames, iters=raft_iter)
                 torch.cuda.empty_cache()
-
             if use_half:
                 frames, flow_masks, masks_dilated = frames.half(), flow_masks.half(), masks_dilated.half()
                 gt_flows_bi = (gt_flows_bi[0].half(), gt_flows_bi[1].half())
                 fix_flow_complete = fix_flow_complete.half()
                 model = model.half()
-
             flow_length = gt_flows_bi[0].size(1)
             if flow_length > subvideo_length:
                 pred_flows_f, pred_flows_b = [], []
@@ -442,10 +462,8 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
                 pred_flows_bi, _ = fix_flow_complete.forward_bidirect_flow(gt_flows_bi, flow_masks)
                 pred_flows_bi = fix_flow_complete.combine_flow(gt_flows_bi, pred_flows_bi, flow_masks)
                 torch.cuda.empty_cache()
-
             del gt_flows_bi
             torch.cuda.empty_cache()
-
             masked_frames = frames * (1 - masks_dilated)
             subvideo_length_img_prop = min(100, subvideo_length)
             if video_length > subvideo_length_img_prop:
@@ -478,10 +496,8 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
                 updated_masks = updated_local_masks.view(b, t, 1, h, w)
                 del prop_imgs, updated_local_masks
                 torch.cuda.empty_cache()
-
             del masked_frames
             torch.cuda.empty_cache()
-
     ori_frames = frames_inp
     comp_frames = [None] * video_length
     neighbor_stride = neighbor_length // 2
@@ -489,7 +505,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
         ref_num = subvideo_length // ref_stride
     else:
         ref_num = -1
-
     for f in tqdm(range(0, video_length, neighbor_stride)):
         neighbor_ids = [i for i in range(max(0, f - neighbor_stride), min(video_length, f + neighbor_stride + 1))]
         ref_ids = get_ref_index(f, neighbor_ids, video_length, ref_stride, ref_num)
@@ -497,7 +512,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
         selected_masks = masks_dilated[:, neighbor_ids + ref_ids, :, :, :]
         selected_update_masks = updated_masks[:, neighbor_ids + ref_ids, :, :, :]
         selected_pred_flows_bi = (pred_flows_bi[0][:, neighbor_ids[:-1], :, :, :], pred_flows_bi[1][:, neighbor_ids[:-1], :, :, :])
-
         with torch.no_grad():
             with torch.inference_mode():
                 l_t = len(neighbor_ids)
@@ -515,13 +529,10 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
                         comp_frames[idx] = img
                     else:
                         comp_frames[idx] = (comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5).astype(np.uint16)
-
         del selected_imgs, selected_masks, selected_update_masks, selected_pred_flows_bi, pred_img, binary_masks
         torch.cuda.empty_cache()
-
     del pred_flows_bi
     torch.cuda.empty_cache()
-
     if save_frames:
         for idx in range(video_length):
             f = comp_frames[idx]
@@ -529,18 +540,14 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
             img_save_root = os.path.join(save_root, str(idx).zfill(4)+'.exr')
             imwrite(f, img_save_root, color_info=color_info)
     else:
-        masked_frame_for_save = [cv2.resize(f, out_size) for f in masked_frame_for_save]
-        comp_frames_uint8 = [(f / 256).astype(np.uint8) for f in comp_frames]
-        comp_frames_uint8 = [cv2.resize(f, out_size) for f in comp_frames_uint8]
+        comp_frames = [cv2.resize(f, out_size, interpolation=cv2.INTER_CUBIC) for f in comp_frames]
+        save_video_highest_quality(comp_frames, os.path.join(save_root, 'inpaint_out.mov'), fps=fps, color_info=color_info)
         if save_masked_in:
-            imageio.mimwrite(os.path.join(save_root, 'masked_in.mp4'), masked_frame_for_save, fps=fps, quality=7)
-        imageio.mimwrite(os.path.join(save_root, 'inpaint_out.mp4'), comp_frames_uint8, fps=fps, quality=7)
-
+            masked_frame_for_save = [cv2.resize(f, out_size, interpolation=cv2.INTER_CUBIC) for f in masked_frame_for_save]
+            save_video_highest_quality(masked_frame_for_save, os.path.join(save_root, 'masked_in.mov'), fps=fps, color_info=color_info)
     del frames, flow_masks, masks_dilated, updated_frames, updated_masks, ori_frames
     torch.cuda.empty_cache()
-
     print(f'\nAll results are saved in {save_root}')
-
 if __name__ == '__main__':
     device = get_device()
     parser = argparse.ArgumentParser()
@@ -562,7 +569,6 @@ if __name__ == '__main__':
     parser.add_argument('--save_frames', action='store_true', help='Save output frames. Default: False')
     parser.add_argument('--fp16', action='store_true', help='Use fp16 (half precision) during inference. Default: fp32 (single precision).')
     args = parser.parse_args()
-
     run_inference(
         video=args.video,
         mask=args.mask,
@@ -581,7 +587,7 @@ if __name__ == '__main__':
         save_fps=args.save_fps,
         save_frames=args.save_frames,
         fp16=args.fp16,
-        save_masked_in=True,  # Default True for single run
+        save_masked_in=True, # Default True for single run
         models=None,
         device=device
     )
