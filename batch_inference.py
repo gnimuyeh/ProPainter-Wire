@@ -7,7 +7,7 @@ import time
 from inference_propainter import load_models, run_inference, get_device
 
 BAIDU_PCS = "/workspace/BaiduPCS-Go-v3.9.7-linux-amd64/BaiduPCS-Go"
-REMOTE_FOLDER = "/我的资源/sc"
+REMOTE_FOLDER = "/我的资源/demo镜头"
 LOCAL_INPUT_DIR = "/workspace/workdata/input_videos"
 LOCAL_OUTPUT_DIR = "/workspace/workdata/propainter_results"
 
@@ -35,6 +35,7 @@ for file in all_files:
 
     input_path = os.path.join(LOCAL_INPUT_DIR, file)
     mask_path = os.path.join(LOCAL_INPUT_DIR, mask_name)
+    binary_mask_path = os.path.join(LOCAL_INPUT_DIR, f"{basename}_mask_binary{ext}")
     output_path = os.path.join(LOCAL_OUTPUT_DIR, result_name)
 
     if os.path.exists(output_path):
@@ -66,20 +67,30 @@ for file in all_files:
     else:
         print(f"⬇️ Downloading {mask_name}...")
         subprocess.run([BAIDU_PCS, "download", f"{REMOTE_FOLDER}/{mask_name}", "--saveto", LOCAL_INPUT_DIR], check=True)
-        
+        # --- Convert mask to binary ---
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", mask_path,
+                "-vf", "format=gray,geq='if(gt(p(X,Y),128),255,0)'",
+                "-pix_fmt", "gray", "-c:v", "ffv1", binary_mask_path
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
+        print(f"🧹 Converted {mask_name} to binary mask.")
+
     # Run inference (reuses models)
     print(f"🧠 Running ProPainter on {file}...")
     run_inference(
         video=input_path,
-        mask=mask_path,
+        mask=binary_mask_path,
         output=output_path,
         subvideo_length=10,
-        raft_iter=50,
+        raft_iter=30,
         ref_stride=10,
         mask_dilation=0,
         neighbor_length=10,
         fp16=False,  # Set to True if desired
-        save_frames=True,
+        save_frames=False,
         save_masked_in=False,
         models=models
     )
