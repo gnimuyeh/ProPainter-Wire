@@ -3,7 +3,7 @@ FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 # Install system tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget unzip aria2 && \
+    ffmpeg wget unzip aria2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Python packages (Tsinghua mirror = fast)
@@ -19,7 +19,6 @@ RUN wget -q https://github.com/qjfoidnh/BaiduPCS-Go/releases/download/v4.0.0/Bai
     rm -rf BaiduPCS-Go-v4.0.0-linux-amd64.zip BaiduPCS-Go-v4.0.0-linux-amd64
 
 WORKDIR /workspace
-
 COPY . .
 
 CMD ["python3", "-u", "runpod_handler.py"]
