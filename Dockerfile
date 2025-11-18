@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
 
 # Install BaiduPCS-Go into /workspace
 RUN wget -q https://github.com/qjfoidnh/BaiduPCS-Go/releases/download/v4.0.0/BaiduPCS-Go-v4.0.0-linux-amd64.zip && \
-    unzip -q BaiduPCS-Go-v3.9.7-linux-amd64.zip && \
+    unzip -q BaiduPCS-Go-v4.0.0-linux-amd64.zip && \
     mv BaiduPCS-Go-v3.9.7-linux-amd64/BaiduPCS-Go /workspace/BaiduPCS-Go && \
     chmod +x /workspace/BaiduPCS-Go && \
     rm -rf BaiduPCS-Go-v3.9.7-linux-amd64.zip BaiduPCS-Go-v3.9.7-linux-amd64
