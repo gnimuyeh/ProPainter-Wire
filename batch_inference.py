@@ -1,4 +1,3 @@
-# propainter_batch.py
 import argparse
 import os
 import subprocess
@@ -7,7 +6,7 @@ import zipfile
 from inference_propainter import load_models, run_inference, get_device
 from pathlib import Path
 
-def run_propainter_job(job_id: str, source_url: str) -> str:
+def run_job(job_id: str, source_url: str) -> str:
     # ------------------- GLOBAL VARIABLES -------------------
     # This makes everything work the same locally AND in Docker/RunPod
     WORKSPACE = Path(__file__).resolve().parent
@@ -128,7 +127,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        result_url = run_propainter_job(args.job_id, args.source_url)
+        result_url = run_job(args.job_id, args.source_url)
         print("✅ All done!")
         print(result_url)
     except Exception as e:
