@@ -1,63 +1,29 @@
+# handler.py
 from runpod import serverless
-import subprocess
-import os
-import sys
+from propainter_batch import run_propainter_job
+
 
 def handler(job):
-    """
-    RunPod worker handler that receives job input,
-    runs the ProPainter inference, and returns output path or result.
+    inp = job["input"]
+    job_id = inp.get("jobID")
+    source_url = inp.get("sourceUrl")
 
-    Args:
-      job (dict): RunPod job object with 'input' dict containing needed inputs.
+    if not job_id or not source_url:
+        return {"status": 0, "error": "Missing jobID or sourceUrl"}
 
-    Returns:
-      dict: Output dict to return to caller.
-    """
     try:
-        # Example: input expects paths or data from job["input"]
-        input_video = job["input"].get("input_video")
-        mask_video = job["input"].get("mask_video")
-        mask_dilation = job["input"].get("mask_dilation", 4)
-        ref_stride = job["input"].get("ref_stride", 1)
-        neighbor_length = job["input"].get("neighbor_length", 10)
-        subvideo_length = job["input"].get("subvideo_length", 20)
-        raft_iter = job["input"].get("raft_iter", 20)
+        result_url = run_propainter_job(job_id=job_id, source_url=source_url)
 
-
-        # Paths inside container workspace, adjust as needed
-        # Assume inputs are already uploaded to container or mounted volume
-
-        # Build command to run your inference script
-        cmd = [
-            "python",
-            "inference_propainter.py",
-            "--video", input_video,
-            "--mask", mask_video,
-            "--mask_dilation", str(mask_dilation),
-            "--ref_stride", str(ref_stride),
-            "--neighbor_length", str(neighbor_length),
-            "--subvideo_length", str(subvideo_length),
-            "--raft_iter", str(raft_iter),
-            "--output", "/runpod-volume/outputs",
-            "--fp16"
-        ]
-
-        # Run the inference subprocess
-        result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
-
-        if result.returncode != 0:
-            return {
-                "status": "error",
-                "message": "Inference failed.",
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
-
-        return {"status": "success", "output": "/runpod-volume/outputs/inpainted_output.mov"}
-
+        return {
+            "status": 1,
+            "jobID": job_id,
+            "resultUrl": result_url
+        }
     except Exception as e:
-        return {"error": str(e)}
+        return {
+            "status": 0,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     serverless.start({"handler": handler})
