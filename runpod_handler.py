@@ -1,6 +1,6 @@
 # handler.py
 from runpod import serverless
-from propainter_batch import run_propainter_job
+from batch_inference import run_job
 
 
 def handler(job):
@@ -12,7 +12,7 @@ def handler(job):
         return {"status": 0, "error": "Missing jobID or sourceUrl"}
 
     try:
-        result_url = run_propainter_job(job_id=job_id, source_url=source_url)
+        result_url = run_job(job_id=job_id, source_url=source_url)
 
         return {
             "status": 1,
