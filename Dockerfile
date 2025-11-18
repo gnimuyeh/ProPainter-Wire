@@ -1,7 +1,5 @@
 # Use RunPod's PyTorch base image for optimal compatibility
-FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
-
-RUN apt-get update && apt-get install -y ffmpeg
+FROM runpod/pytorch:2.8.0-cu1281-torch241-ubuntu2404-devel
 
 RUN pip install --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
@@ -10,6 +8,8 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /workspace
 
-COPY . /workspace
+COPY . .
+
+RUN chmod +x BaiduPCS-Go
 
 CMD ["python3", "-u", "runpod_handler.py"]
