@@ -19,6 +19,7 @@ RUN wget -q https://github.com/qjfoidnh/BaiduPCS-Go/releases/download/v4.0.0/Bai
     rm -rf BaiduPCS-Go-v4.0.0-linux-amd64.zip BaiduPCS-Go-v4.0.0-linux-amd64
 
 WORKDIR /workspace
+
 COPY . .
 
 CMD ["python3", "-u", "runpod_handler.py"]
