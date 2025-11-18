@@ -1,5 +1,5 @@
 # This tag is guaranteed to exist right now
-FROM runpod/pytorch:2.8.0-cu128-devel-ubuntu24.04
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 # Install system tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
