@@ -1,4 +1,3 @@
-import time
 import argparse
 import os
 import stat
@@ -16,108 +15,142 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
     LOCAL_OUTPUT_DIR  = os.path.join(WORKSPACE, "workdata", "propainter_results")
     LOCAL_ZIP_PATH    = os.path.join(WORKSPACE, "workdata", "results.zip")
     REMOTE_JOB_PATH = f"/doya_jobs/{job_id}"
+    REMOTE_ZIP_PATH = f"{REMOTE_JOB_PATH}/results.zip"
     
     # Force add execution rights
-    BAIDU_PCS = os.path.join(WORKSPACE, "BaiduPCS-Go")
+    BAIDU_PCS         = os.path.join(WORKSPACE, "BaiduPCS-Go")
     if os.path.exists(BAIDU_PCS):
         st = os.stat(BAIDU_PCS)
         os.chmod(BAIDU_PCS, st.st_mode | stat.S_IEXEC)
 
-    # ------------------- Helper: Retry Wrapper -------------------
-    def run_pcs_with_retry(cmd_list, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                # We use capture_output=True so we can print errors if needed
-                subprocess.run(cmd_list, check=True, capture_output=True, text=True)
-                return # Success, exit loop
-            except subprocess.CalledProcessError as e:
-                error_msg = e.stderr or e.stdout or "Unknown Error"
-                print(f"⚠️ Attempt {attempt + 1}/{max_retries} failed: {error_msg}", flush=True)
-                
-                # If it's the last attempt, raise the error
-                if attempt == max_retries - 1:
-                    raise RuntimeError(f"BaiduPCS Command Failed after {max_retries} retries: {error_msg}")
-                
-                # Wait before retrying (Exponential backoff: 2s, 4s, 8s)
-                time.sleep(2 * (attempt + 1))
-
-    # ------------------- Login & Config -------------------
+    # ------------------- Ensure Baidu login -------------------
     bduss = os.getenv("BAIDU_BDUSS")
     stoken = os.getenv("BAIDU_STOKEN")
     if not bduss or not stoken:
-        raise RuntimeError("Missing BAIDU_BDUSS / BAIDU_STOKEN")
+        raise RuntimeError("Missing BAIDU_BDUSS / BAIDU_STOKEN environment variables")
+    subprocess.run([BAIDU_PCS, "login", f"-bduss={bduss}", f"-stoken={stoken}"], check=True)
 
-    # Login (Standard run is fine here)
-    subprocess.run([BAIDU_PCS, "login", f"-bduss={bduss}", f"-stoken={stoken}"], check=True, stdout=subprocess.DEVNULL)
-
-    # --- STABILITY FIXES: Set User Agent and AppID ---
-    # Pretend to be a standard Chrome browser on Windows
-    run_pcs_with_retry([BAIDU_PCS, "config", "set", "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"])
-    # Set AppID to 266719 (Standard) or 778750 (Enterprise) - 266719 is usually best for transfers
-    run_pcs_with_retry([BAIDU_PCS, "config", "set", "-appid", "266719"])
-    
-    run_pcs_with_retry([BAIDU_PCS, "config", "set", "-savedir", LOCAL_INPUT_DIR])
-    run_pcs_with_retry([BAIDU_PCS, "config", "set", "-max_parallel", "20"])
-    
-    # ------------------- Clean Local Dirs -------------------
+    # ------------------- Clean & prepare local dirs -------------------
     for p in [LOCAL_INPUT_DIR, LOCAL_OUTPUT_DIR]:
-        if os.path.exists(p): shutil.rmtree(p)
+        if os.path.exists(p):
+            shutil.rmtree(p)
         os.makedirs(p, exist_ok=True)
 
-    # ------------------- Prepare Remote Dir -------------------
-    # Ignore errors on mkdir (if it exists, that's fine)
-    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], stderr=subprocess.DEVNULL)
-    run_pcs_with_retry([BAIDU_PCS, "cd", REMOTE_JOB_PATH])
-
-    # ------------------- Download with Retry -------------------
-    if progress_callback: progress_callback("Downloading video...")
-    print(f"Downloading from: {source_url}", flush=True)
-
-    transfer_cmd = [BAIDU_PCS, "transfer", "--download"]
+    # ------------------- BaiduPCS-Go config & download -------------------
+    if progress_callback: progress_callback("Initializing Download...")
     
-    # Handle URL splitting logic
+    subprocess.run([BAIDU_PCS, "config", "set", "-savedir", LOCAL_INPUT_DIR], check=True)
+    subprocess.run([BAIDU_PCS, "config", "set", "-max_parallel", "20"], check=True)
+    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=True)
+    subprocess.run([BAIDU_PCS, "cd", REMOTE_JOB_PATH], check=True)
+    
+    # Handle URL splitting for password protection if needed
     if "?pwd=" in source_url:
         link, pwd = source_url.split("?pwd=")
-        transfer_cmd.extend([link, pwd])
+        subprocess.run([BAIDU_PCS, "transfer", "--download", link, pwd], check=True)
     else:
-        transfer_cmd.append(source_url)
+        subprocess.run([BAIDU_PCS, "transfer", "--download", source_url], check=True)
 
-    # EXECUTE TRANSFER WITH RETRY
-    # This is where Error -9 usually happens. The retry loop handles it.
-    run_pcs_with_retry(transfer_cmd, max_retries=5)
+    # ------------------- Find video directory -------------------
+    video_dir = next(
+        (root for root, _, files in os.walk(LOCAL_INPUT_DIR)
+         if any(f.lower().endswith('.mov') for f in files)),
+        None
+    )
+    if not video_dir:
+        raise ValueError("No .mov files found after download")
 
-    # ------------------- Rest of the script... -------------------
-    # ... (Continue with your existing video finding, inference, zipping, uploading code)
-    # ...
+    # ------------------- Count Files for Progress -------------------
+    all_files = [f for f in os.listdir(video_dir) 
+                 if f.lower().endswith('.mov') and '_mask.' not in f and '_result.' not in f]
+    total_files = len(all_files)
+    print(f"Found {total_files} videos to process", flush=True)
+
+    # ------------------- Load models -------------------
+    if progress_callback: progress_callback(f"Loading AI Models... (0/{total_files})")
+    device = get_device()
+    models = load_models(device, use_half=False)
+
+    # ------------------- Process each video -------------------
+    processed_count = 0
     
-    # (Just copy the rest of your logic here for finding .mov files, inference, etc.)
-    # Below is the quick summary of the rest to complete the snippet:
+    for file in all_files:
+        basename, ext = os.path.splitext(file)
+        
+        # --- PROGRESS UPDATE ---
+        msg = f"Processing: {file} ({processed_count + 1}/{total_files})"
+        print(msg, flush=True)
+        if progress_callback: progress_callback(msg)
+        # -----------------------
 
-    video_dir = next((root for root, _, files in os.walk(LOCAL_INPUT_DIR) if any(f.lower().endswith('.mov') for f in files)), None)
-    if not video_dir: raise ValueError("No .mov files found after download")
+        mask_path = os.path.join(video_dir, f"{basename}_mask{ext}")
+        if not os.path.exists(mask_path):
+            print(f"Skipping {file} — no mask")
+            continue
 
-    # ... [INSERT YOUR INFERENCE LOOP HERE] ...
-    # ... (Use the code from the previous message for inference loop) ...
+        final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
+        if os.path.exists(final_out):
+            processed_count += 1
+            continue
 
-    # ------------------- Upload & Share -------------------
-    if progress_callback: progress_callback("Uploading results...")
-    run_pcs_with_retry([BAIDU_PCS, "upload", LOCAL_ZIP_PATH, REMOTE_JOB_PATH])
+        binary_mask = os.path.join(video_dir, f"{basename}_mask_binary{ext}")
+
+        # Binary mask conversion
+        subprocess.run([
+            "ffmpeg", "-y", "-i", mask_path,
+            "-vf", "format=gray,geq='if(gt(p(X,Y),128),255,0)'",
+            "-pix_fmt", "gray", "-c:v", "ffv1", binary_mask
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Inference
+        run_inference(
+            video=os.path.join(video_dir, file),
+            mask=binary_mask,
+            output=LOCAL_OUTPUT_DIR,
+            subvideo_length=10,
+            raft_iter=30,
+            ref_stride=10,
+            mask_dilation=0,
+            neighbor_length=10,
+            fp16=False,
+            save_frames=False,
+            save_masked_in=False,
+            models=models
+        )
+
+        # Rename result
+        temp_result = os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")
+        if os.path.exists(temp_result):
+            shutil.move(temp_result, final_out)
+        
+        processed_count += 1
+
+    # ------------------- Zip results -------------------
+    if progress_callback: progress_callback("Zipping results...")
+    with zipfile.ZipFile(LOCAL_ZIP_PATH, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(LOCAL_OUTPUT_DIR):
+            for f in files:
+                fp = os.path.join(root, f)
+                arcname = os.path.relpath(fp, os.path.dirname(LOCAL_OUTPUT_DIR))
+                z.write(fp, arcname)
+
+    # ------------------- Upload & share -------------------
+    if progress_callback: progress_callback("Uploading to Baidu Pan...")
+    subprocess.run([BAIDU_PCS, "upload", LOCAL_ZIP_PATH, REMOTE_JOB_PATH], check=True)
 
     share = subprocess.run(
-        [BAIDU_PCS, "share", "set", f"{REMOTE_JOB_PATH}/results.zip", "--period", "0"],
+        [BAIDU_PCS, "share", "set", REMOTE_ZIP_PATH, "--period", "0"],
         capture_output=True, text=True, check=True
     )
-    
-    # Parse Output
     output = share.stdout.strip()
     parts = [p.strip() for p in output.split(',')]
-    final_url = next((p.split('链接: ')[1] for p in parts if p.startswith('链接: ')), None)
-    final_pwd = next((p.split('密码: ')[1] for p in parts if p.startswith('密码: ')), None)
+    url = next((p.split('链接: ')[1] for p in parts if p.startswith('链接: ')), None)
+    pwd = next((p.split('密码: ')[1] for p in parts if p.startswith('密码: ')), None)
     
-    if not (final_url and final_pwd):
+    if not (url and pwd):
         raise RuntimeError(f"Failed to parse share link. Output: {output}")
 
-    return f"{final_url}?pwd={final_pwd}"
+    return f"{url}?pwd={pwd}"
 
 # ==================== CLI ENTRYPOINT ====================
 if __name__ == "__main__":
