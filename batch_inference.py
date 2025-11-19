@@ -1,5 +1,6 @@
 import argparse
 import os
+import stat
 import subprocess
 import shutil
 import zipfile
@@ -10,12 +11,15 @@ def run_job(job_id: str, source_url: str) -> str:
     # ------------------- GLOBAL VARIABLES -------------------
     # This makes everything work the same locally AND in Docker/RunPod
     WORKSPACE = Path(__file__).resolve().parent
-    BAIDU_PCS         = os.path.join(WORKSPACE, "BaiduPCS-Go")        # ← binary name
     LOCAL_INPUT_DIR   = os.path.join(WORKSPACE, "workdata", "input_videos")
     LOCAL_OUTPUT_DIR  = os.path.join(WORKSPACE, "workdata", "propainter_results")
     LOCAL_ZIP_PATH    = os.path.join(WORKSPACE, "workdata", "results.zip")
     REMOTE_JOB_PATH = f"/doya_jobs/{job_id}"
     REMOTE_ZIP_PATH = f"{REMOTE_JOB_PATH}/results.zip"
+    # Force add execution rights for the CURRENT user (whoever that is)
+    BAIDU_PCS         = os.path.join(WORKSPACE, "BaiduPCS-Go")
+    st = os.stat(BAIDU_PCS)
+    os.chmod(BAIDU_PCS, st.st_mode | stat.S_IEXEC)
 
     # ------------------- Ensure Baidu login (idempotent & secure) -------------------
     bduss = os.getenv("BAIDU_BDUSS")
@@ -33,7 +37,7 @@ def run_job(job_id: str, source_url: str) -> str:
     # ------------------- BaiduPCS-Go config & download -------------------
     subprocess.run([BAIDU_PCS, "config", "set", "-savedir", LOCAL_INPUT_DIR], check=True)
     subprocess.run([BAIDU_PCS, "config", "set", "-max_parallel", "20"], check=True)
-    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=True)
     subprocess.run([BAIDU_PCS, "cd", REMOTE_JOB_PATH], check=True)
     subprocess.run([BAIDU_PCS, "transfer", "--download", source_url], check=True)
 
@@ -72,7 +76,7 @@ def run_job(job_id: str, source_url: str) -> str:
             "ffmpeg", "-y", "-i", mask_path,
             "-vf", "format=gray,geq='if(gt(p(X,Y),128),255,0)'",
             "-pix_fmt", "gray", "-c:v", "ffv1", binary_mask
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        ], check=True)
 
         # Inference
         run_inference(
