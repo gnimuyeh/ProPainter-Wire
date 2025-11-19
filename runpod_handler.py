@@ -1,32 +1,51 @@
 import sys
 import traceback
-from runpod import serverless
+import runpod
 from batch_inference import run_job
 
+# Force unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
+
 def handler(job):
+    # 1. Use RunPod's native Request ID as the single truth
+    runpod_id = job["id"]
+    
     inp = job["input"]
-    job_id = inp.get("jobID")
     source_url = inp.get("sourceUrl")
 
-    if not job_id or not source_url:
-        return {"status": 0, "error": "Missing jobID or sourceUrl"}
+    print(f"Received Job ID: {runpod_id}", flush=True)
+
+    if not source_url:
+        return {"status": 0, "error": "Missing sourceUrl"}
+
+    # 2. Define the Progress Callback
+    def update_progress(message):
+        try:
+            # This sends the message back to the UI while running
+            runpod.serverless.progress_update(job, message)
+        except Exception:
+            pass
 
     try:
-        result_url = run_job(job_id=job_id, source_url=source_url)
+        # 3. Execute Logic
+        result_url = run_job(
+            job_id=runpod_id, 
+            source_url=source_url, 
+            progress_callback=update_progress
+        )
 
         return {
             "status": 1,
-            "jobID": job_id,
+            "jobID": runpod_id,
             "resultUrl": result_url
         }
     except Exception as e:
-        print(f"❌ Job {job_id} Failed!", flush=True)
-        traceback.print_exc() # This prints the full stack trace to logs
+        print(f"❌ Job {runpod_id} Failed!", flush=True)
+        traceback.print_exc()
         return {
             "status": 0,
             "error": str(e)
         }
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(line_buffering=True)
-    serverless.start({"handler": handler})
+    runpod.serverless.start({"handler": handler})
