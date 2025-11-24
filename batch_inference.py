@@ -222,4 +222,7 @@ if __name__ == "__main__":
     try:
         result_data = run_job(args.job_id, args.source_url)
         print("✅ All done!")
-        print(json.
+        print(json.dumps(result_data))
+    except Exception as e:
+        print("❌ Failed:", e)
+        raise
