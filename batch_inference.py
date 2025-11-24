@@ -6,7 +6,7 @@ import shutil
 import zipfile
 import json
 import math
-import cv2  # Required for duration calculation
+import cv2
 from inference_propainter import load_models, run_inference, get_device
 from pathlib import Path
 
@@ -33,26 +33,35 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
         raise RuntimeError("Missing BAIDU_BDUSS / BAIDU_STOKEN environment variables")
     subprocess.run([BAIDU_PCS, "login", f"-bduss={bduss}", f"-stoken={stoken}"], check=True)
 
-    # ------------------- Clean & prepare local dirs -------------------
-    for p in [LOCAL_INPUT_DIR, LOCAL_OUTPUT_DIR]:
-        if os.path.exists(p):
-            shutil.rmtree(p)
-        os.makedirs(p, exist_ok=True)
+    # ------------------- Prepare local dirs (NO CLEANUP) -------------------
+    # We DO NOT delete existing folders here to allow resuming.
+    os.makedirs(LOCAL_INPUT_DIR, exist_ok=True)
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
 
     # ------------------- BaiduPCS-Go config & download -------------------
     if progress_callback: progress_callback("Initializing Download...")
     
+    # Config commands (usually fast/safe)
     subprocess.run([BAIDU_PCS, "config", "set", "-savedir", LOCAL_INPUT_DIR], check=True)
     subprocess.run([BAIDU_PCS, "config", "set", "-max_parallel", "20"], check=True)
-    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=True)
+    
+    # Try to create/cd remote dir, ignore errors if it exists
+    subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=False) 
     subprocess.run([BAIDU_PCS, "cd", REMOTE_JOB_PATH], check=True)
     
-    # Handle URL splitting for password protection if needed
-    if "?pwd=" in source_url:
-        link, pwd = source_url.split("?pwd=")
-        subprocess.run([BAIDU_PCS, "transfer", "--download", link, pwd], check=True)
-    else:
-        subprocess.run([BAIDU_PCS, "transfer", "--download", source_url], check=True)
+    # --- DOWNLOAD WITH FAILURE HANDLER ---
+    try:
+        # Handle URL splitting for password protection if needed
+        if "?pwd=" in source_url:
+            link, pwd = source_url.split("?pwd=")
+            subprocess.run([BAIDU_PCS, "transfer", "--download", link, pwd], check=True)
+        else:
+            subprocess.run([BAIDU_PCS, "transfer", "--download", source_url], check=True)
+    except subprocess.CalledProcessError as e:
+        msg = f"⚠️ Download command returned error {e.returncode}. Checking local cache..."
+        print(msg, flush=True)
+        if progress_callback: progress_callback(msg)
+        # We do NOT raise here. We proceed to see if files exist.
 
     # ------------------- Find video directory -------------------
     video_dir = next(
@@ -60,8 +69,10 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
          if any(f.lower().endswith('.mov') for f in files)),
         None
     )
+    
+    # If download failed AND no files exist, this will trigger the failure.
     if not video_dir:
-        raise ValueError("No .mov files found after download")
+        raise ValueError("No .mov files found (Download failed and no local cache)")
 
     # ------------------- Count Files for Progress -------------------
     all_files = [f for f in os.listdir(video_dir) 
@@ -88,15 +99,18 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
         if progress_callback: progress_callback(msg)
         # -----------------------
 
+        # Check for existing result (Resumption Logic)
+        final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
+        if os.path.exists(final_out):
+            print(f"Skipping {file} — result already exists")
+            processed_count += 1
+            # If the input still exists for some reason, we can delete it now
+            if os.path.exists(video_path): os.remove(video_path)
+            continue
+
         mask_path = os.path.join(video_dir, f"{basename}_mask{ext}")
         if not os.path.exists(mask_path):
             print(f"Skipping {file} — no mask")
-            # Cleanup skipped file to save space? Optional, but safer to leave if debugging.
-            continue
-
-        final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
-        if os.path.exists(final_out):
-            processed_count += 1
             continue
 
         # --- CALCULATE DURATION ---
@@ -143,7 +157,6 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
             shutil.move(temp_result, final_out)
         
         # --- CLEANUP INPUT FILES ---
-        # Remove input video, input mask, and binary mask to save space
         try:
             if os.path.exists(video_path): os.remove(video_path)
             if os.path.exists(mask_path): os.remove(mask_path)
@@ -178,6 +191,21 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
     if not (url and pwd):
         raise RuntimeError(f"Failed to parse share link. Output: {output}")
 
+    # ------------------- FINAL CLEANUP (Success Only) -------------------
+    if progress_callback: progress_callback("Cleaning up workspace...")
+    try:
+        # Wipe the input folder (any remaining files)
+        if os.path.exists(LOCAL_INPUT_DIR):
+            shutil.rmtree(LOCAL_INPUT_DIR)
+        # Wipe the output folder
+        if os.path.exists(LOCAL_OUTPUT_DIR):
+            shutil.rmtree(LOCAL_OUTPUT_DIR)
+        # Wipe the zip
+        if os.path.exists(LOCAL_ZIP_PATH):
+            os.remove(LOCAL_ZIP_PATH)
+    except Exception as e:
+        print(f"Warning: Final cleanup failed: {e}")
+
     # Return structured data
     return {
         "url": f"{url}?pwd={pwd}",
@@ -194,8 +222,4 @@ if __name__ == "__main__":
     try:
         result_data = run_job(args.job_id, args.source_url)
         print("✅ All done!")
-        # Print JSON so the handler/UI can parse it cleanly
-        print(json.dumps(result_data))
-    except Exception as e:
-        print("❌ Failed:", e)
-        raise
+        print(json.
