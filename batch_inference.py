@@ -4,11 +4,14 @@ import stat
 import subprocess
 import shutil
 import zipfile
+import json
+import math
+import cv2  # Required for duration calculation
 from inference_propainter import load_models, run_inference, get_device
 from pathlib import Path
 
 # Update signature to accept progress_callback
-def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
+def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
     # ------------------- GLOBAL VARIABLES -------------------
     WORKSPACE = Path(__file__).resolve().parent
     LOCAL_INPUT_DIR   = os.path.join(WORKSPACE, "workdata", "input_videos")
@@ -73,9 +76,11 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
 
     # ------------------- Process each video -------------------
     processed_count = 0
+    total_seconds_accumulated = 0.0
     
     for file in all_files:
         basename, ext = os.path.splitext(file)
+        video_path = os.path.join(video_dir, file)
         
         # --- PROGRESS UPDATE ---
         msg = f"Processing: {file} ({processed_count + 1}/{total_files})"
@@ -86,12 +91,26 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
         mask_path = os.path.join(video_dir, f"{basename}_mask{ext}")
         if not os.path.exists(mask_path):
             print(f"Skipping {file} — no mask")
+            # Cleanup skipped file to save space? Optional, but safer to leave if debugging.
             continue
 
         final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
         if os.path.exists(final_out):
             processed_count += 1
             continue
+
+        # --- CALCULATE DURATION ---
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if fps > 0:
+                    duration = frame_count / fps
+                    total_seconds_accumulated += duration
+            cap.release()
+        except Exception as e:
+            print(f"Warning: Could not calculate duration for {file}: {e}")
 
         binary_mask = os.path.join(video_dir, f"{basename}_mask_binary{ext}")
 
@@ -104,7 +123,7 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
 
         # Inference
         run_inference(
-            video=os.path.join(video_dir, file),
+            video=video_path,
             mask=binary_mask,
             output=LOCAL_OUTPUT_DIR,
             subvideo_length=10,
@@ -122,6 +141,15 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
         temp_result = os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")
         if os.path.exists(temp_result):
             shutil.move(temp_result, final_out)
+        
+        # --- CLEANUP INPUT FILES ---
+        # Remove input video, input mask, and binary mask to save space
+        try:
+            if os.path.exists(video_path): os.remove(video_path)
+            if os.path.exists(mask_path): os.remove(mask_path)
+            if os.path.exists(binary_mask): os.remove(binary_mask)
+        except Exception as e:
+            print(f"Warning: Failed to cleanup files for {basename}: {e}")
         
         processed_count += 1
 
@@ -150,7 +178,11 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> str:
     if not (url and pwd):
         raise RuntimeError(f"Failed to parse share link. Output: {output}")
 
-    return f"{url}?pwd={pwd}"
+    # Return structured data
+    return {
+        "url": f"{url}?pwd={pwd}",
+        "duration": math.ceil(total_seconds_accumulated)
+    }
 
 # ==================== CLI ENTRYPOINT ====================
 if __name__ == "__main__":
@@ -160,9 +192,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        result_url = run_job(args.job_id, args.source_url)
+        result_data = run_job(args.job_id, args.source_url)
         print("✅ All done!")
-        print(result_url)
+        # Print JSON so the handler/UI can parse it cleanly
+        print(json.dumps(result_data))
     except Exception as e:
         print("❌ Failed:", e)
         raise
