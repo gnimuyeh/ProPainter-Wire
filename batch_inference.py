@@ -75,8 +75,9 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
         raise ValueError("No .mov files found (Download failed and no local cache)")
 
     # ------------------- Count Files for Progress -------------------
+    # UPDATED FILTER: Removed the dot from '_mask.' to catch '_mask_binary' etc.
     all_files = [f for f in os.listdir(video_dir) 
-                 if f.lower().endswith('.mov') and '_mask.' not in f and '_result.' not in f]
+                 if f.lower().endswith('.mov') and '_mask' not in f and '_result' not in f]
     total_files = len(all_files)
     print(f"Found {total_files} videos to process", flush=True)
 
