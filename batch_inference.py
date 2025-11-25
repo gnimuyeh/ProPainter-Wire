@@ -155,15 +155,6 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
             print(f"❌ Error processing {file}: {error_msg}")
             failed_files.append({"file": file, "error": error_msg})
             # We do NOT raise here, we continue loop
-        
-        finally:
-            # --- INDIVIDUAL FILE CLEANUP (Run regardless of success/fail) ---
-            try:
-                if os.path.exists(video_path): os.remove(video_path)
-                if os.path.exists(mask_path): os.remove(mask_path)
-                if os.path.exists(binary_mask): os.remove(binary_mask)
-            except Exception as e:
-                print(f"Warning: Failed to cleanup files for {basename}: {e}")
 
     # ------------------- Zip results -------------------
     # Only zip if we actually have results (check LOCAL_OUTPUT_DIR not empty)
