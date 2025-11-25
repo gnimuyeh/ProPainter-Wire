@@ -34,24 +34,18 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
     subprocess.run([BAIDU_PCS, "login", f"-bduss={bduss}", f"-stoken={stoken}"], check=True)
 
     # ------------------- Prepare local dirs (NO CLEANUP) -------------------
-    # We DO NOT delete existing folders here to allow resuming.
     os.makedirs(LOCAL_INPUT_DIR, exist_ok=True)
     os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
 
     # ------------------- BaiduPCS-Go config & download -------------------
     if progress_callback: progress_callback("Initializing Download...")
     
-    # Config commands (usually fast/safe)
     subprocess.run([BAIDU_PCS, "config", "set", "-savedir", LOCAL_INPUT_DIR], check=True)
     subprocess.run([BAIDU_PCS, "config", "set", "-max_parallel", "20"], check=True)
-    
-    # Try to create/cd remote dir, ignore errors if it exists
     subprocess.run([BAIDU_PCS, "mkdir", REMOTE_JOB_PATH], check=False) 
     subprocess.run([BAIDU_PCS, "cd", REMOTE_JOB_PATH], check=True)
     
-    # --- DOWNLOAD WITH FAILURE HANDLER ---
     try:
-        # Handle URL splitting for password protection if needed
         if "?pwd=" in source_url:
             link, pwd = source_url.split("?pwd=")
             subprocess.run([BAIDU_PCS, "transfer", "--download", link, pwd], check=True)
@@ -61,7 +55,6 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
         msg = f"⚠️ Download command returned error {e.returncode}. Checking local cache..."
         print(msg, flush=True)
         if progress_callback: progress_callback(msg)
-        # We do NOT raise here. We proceed to see if files exist.
 
     # ------------------- Find video directory -------------------
     video_dir = next(
@@ -70,12 +63,10 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
         None
     )
     
-    # If download failed AND no files exist, this will trigger the failure.
     if not video_dir:
         raise ValueError("No .mov files found (Download failed and no local cache)")
 
     # ------------------- Count Files for Progress -------------------
-    # UPDATED FILTER: Removed the dot from '_mask.' to catch '_mask_binary' etc.
     all_files = [f for f in os.listdir(video_dir) 
                  if f.lower().endswith('.mov') and '_mask' not in f and '_result' not in f]
     total_files = len(all_files)
@@ -89,85 +80,99 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
     # ------------------- Process each video -------------------
     processed_count = 0
     total_seconds_accumulated = 0.0
+    failed_files = [] # Track errors
     
     for file in all_files:
         basename, ext = os.path.splitext(file)
         video_path = os.path.join(video_dir, file)
-        
+        mask_path = os.path.join(video_dir, f"{basename}_mask{ext}")
+        binary_mask = os.path.join(video_dir, f"{basename}_mask_binary{ext}")
+        final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
+
         # --- PROGRESS UPDATE ---
         msg = f"Processing: {file} ({processed_count + 1}/{total_files})"
         print(msg, flush=True)
         if progress_callback: progress_callback(msg)
         # -----------------------
 
-        # Check for existing result (Resumption Logic)
-        final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
-        if os.path.exists(final_out):
-            print(f"Skipping {file} — result already exists")
+        try:
+            # 1. Validation Checks
+            if os.path.exists(final_out):
+                print(f"Skipping {file} — result already exists")
+                processed_count += 1
+                continue # Cleanup in finally block will handle deletions if needed
+
+            if not os.path.exists(mask_path):
+                print(f"Skipping {file} — no mask")
+                continue
+
+            # 2. Duration Calculation
+            try:
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    if fps > 0:
+                        duration = frame_count / fps
+                        total_seconds_accumulated += duration
+                cap.release()
+            except Exception as e:
+                print(f"Warning: Could not calculate duration for {file}: {e}")
+
+            # 3. Binary mask conversion
+            subprocess.run([
+                "ffmpeg", "-y", "-i", mask_path,
+                "-vf", "format=gray,geq='if(gt(p(X,Y),128),255,0)'",
+                "-pix_fmt", "gray", "-c:v", "ffv1", binary_mask
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 4. Inference
+            run_inference(
+                video=video_path,
+                mask=binary_mask,
+                output=LOCAL_OUTPUT_DIR,
+                subvideo_length=10,
+                raft_iter=30,
+                ref_stride=10,
+                mask_dilation=0,
+                neighbor_length=10,
+                fp16=False,
+                save_frames=False,
+                save_masked_in=False,
+                models=models
+            )
+
+            # 5. Rename result
+            temp_result = os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")
+            if os.path.exists(temp_result):
+                shutil.move(temp_result, final_out)
+            
             processed_count += 1
-            # If the input still exists for some reason, we can delete it now
-            if os.path.exists(video_path): os.remove(video_path)
-            continue
 
-        mask_path = os.path.join(video_dir, f"{basename}_mask{ext}")
-        if not os.path.exists(mask_path):
-            print(f"Skipping {file} — no mask")
-            continue
-
-        # --- CALCULATE DURATION ---
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                if fps > 0:
-                    duration = frame_count / fps
-                    total_seconds_accumulated += duration
-            cap.release()
         except Exception as e:
-            print(f"Warning: Could not calculate duration for {file}: {e}")
-
-        binary_mask = os.path.join(video_dir, f"{basename}_mask_binary{ext}")
-
-        # Binary mask conversion
-        subprocess.run([
-            "ffmpeg", "-y", "-i", mask_path,
-            "-vf", "format=gray,geq='if(gt(p(X,Y),128),255,0)'",
-            "-pix_fmt", "gray", "-c:v", "ffv1", binary_mask
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        # Inference
-        run_inference(
-            video=video_path,
-            mask=binary_mask,
-            output=LOCAL_OUTPUT_DIR,
-            subvideo_length=10,
-            raft_iter=30,
-            ref_stride=10,
-            mask_dilation=0,
-            neighbor_length=10,
-            fp16=False,
-            save_frames=False,
-            save_masked_in=False,
-            models=models
-        )
-
-        # Rename result
-        temp_result = os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")
-        if os.path.exists(temp_result):
-            shutil.move(temp_result, final_out)
+            # --- ERROR HANDLING ---
+            error_msg = str(e)
+            print(f"❌ Error processing {file}: {error_msg}")
+            failed_files.append({"file": file, "error": error_msg})
+            # We do NOT raise here, we continue loop
         
-        # --- CLEANUP INPUT FILES ---
-        try:
-            if os.path.exists(video_path): os.remove(video_path)
-            if os.path.exists(mask_path): os.remove(mask_path)
-            if os.path.exists(binary_mask): os.remove(binary_mask)
-        except Exception as e:
-            print(f"Warning: Failed to cleanup files for {basename}: {e}")
-        
-        processed_count += 1
+        finally:
+            # --- INDIVIDUAL FILE CLEANUP (Run regardless of success/fail) ---
+            try:
+                if os.path.exists(video_path): os.remove(video_path)
+                if os.path.exists(mask_path): os.remove(mask_path)
+                if os.path.exists(binary_mask): os.remove(binary_mask)
+            except Exception as e:
+                print(f"Warning: Failed to cleanup files for {basename}: {e}")
 
     # ------------------- Zip results -------------------
+    # Only zip if we actually have results (check LOCAL_OUTPUT_DIR not empty)
+    has_results = any(os.scandir(LOCAL_OUTPUT_DIR))
+    
+    if not has_results and failed_files:
+        # If everything failed, raise an error so the job is marked failed
+        raise RuntimeError(f"All {total_files} videos failed. Errors: {failed_files}")
+
     if progress_callback: progress_callback("Zipping results...")
     with zipfile.ZipFile(LOCAL_ZIP_PATH, 'w', compression=zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(LOCAL_OUTPUT_DIR):
@@ -195,22 +200,17 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
     # ------------------- FINAL CLEANUP (Success Only) -------------------
     if progress_callback: progress_callback("Cleaning up workspace...")
     try:
-        # Wipe the input folder (any remaining files)
-        if os.path.exists(LOCAL_INPUT_DIR):
-            shutil.rmtree(LOCAL_INPUT_DIR)
-        # Wipe the output folder
-        if os.path.exists(LOCAL_OUTPUT_DIR):
-            shutil.rmtree(LOCAL_OUTPUT_DIR)
-        # Wipe the zip
-        if os.path.exists(LOCAL_ZIP_PATH):
-            os.remove(LOCAL_ZIP_PATH)
+        if os.path.exists(LOCAL_INPUT_DIR): shutil.rmtree(LOCAL_INPUT_DIR)
+        if os.path.exists(LOCAL_OUTPUT_DIR): shutil.rmtree(LOCAL_OUTPUT_DIR)
+        if os.path.exists(LOCAL_ZIP_PATH): os.remove(LOCAL_ZIP_PATH)
     except Exception as e:
         print(f"Warning: Final cleanup failed: {e}")
 
-    # Return structured data
+    # Return structured data with errors
     return {
         "url": f"{url}?pwd={pwd}",
-        "duration": math.ceil(total_seconds_accumulated)
+        "duration": math.ceil(total_seconds_accumulated),
+        "errors": failed_files
     }
 
 # ==================== CLI ENTRYPOINT ====================
