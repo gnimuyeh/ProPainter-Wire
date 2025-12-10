@@ -1,16 +1,26 @@
-av
-addict
-einops
-future
-numpy
+# --- Core ProPainter Dependencies ---
 scipy
-opencv-python
-matplotlib
 scikit-image
-torch>=1.7.1
-torchvision>=0.8.2
-imageio-ffmpeg
-pyyaml
-requests
+imageio
+opencv-python
+einops
 timm
+addict
 yapf
+future
+tensorboard
+pyyaml
+openmim
+
+# --- Utilities ---
+tqdm
+requests
+rich
+
+# --- RunPod Worker ---
+runpod
+
+# --- Git Dependencies (Keep these!) ---
+segment_anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf
+thinplate @ git+https://github.com/cheind/py-thin-plate-spline@f6995795397118b7d0ac01aecd3f39ffbfad9dee
+simple-lama-inpainting==0.1.0
