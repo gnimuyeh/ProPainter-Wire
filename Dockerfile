@@ -6,7 +6,7 @@ WORKDIR /workspace
 # --- 1. INSTALL SYSTEM DEPENDENCIES ---
 # ProPainter / Video processing usually needs these for OpenCV/FFmpeg
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
