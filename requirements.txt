@@ -2,7 +2,7 @@
 scipy
 scikit-image
 imageio
-opencv-python
+opencv-python-headless
 einops
 timm
 addict
