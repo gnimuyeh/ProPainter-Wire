@@ -23,6 +23,8 @@ import queue
 import gc
 import shutil
 
+MODEL_PATH = "/runpod-volume/weights"
+
 warnings.filterwarnings("ignore")
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
 
@@ -309,15 +311,15 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
     return flow_masks_pil, masks_dilated_pil
 
 def load_models(device, use_half=False):
-    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'raft-things.pth'), model_dir='weights', progress=True, file_name=None)
+    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'raft-things.pth'), model_dir=MODEL_PATH', progress=True, file_name=None)
     fix_raft = RAFT_bi(ckpt_path, device)
     
-    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'recurrent_flow_completion.pth'), model_dir='weights', progress=True, file_name=None)
+    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'recurrent_flow_completion.pth'), model_dir=MODEL_PATH', progress=True, file_name=None)
     fix_flow_complete = RecurrentFlowCompleteNet(ckpt_path)
     for p in fix_flow_complete.parameters(): p.requires_grad = False
     fix_flow_complete.to(device).eval()
     
-    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'ProPainter.pth'), model_dir='weights', progress=True, file_name=None)
+    ckpt_path = load_file_from_url(os.path.join(pretrain_model_url, 'ProPainter.pth'), model_dir=MODEL_PATH', progress=True, file_name=None)
     model = InpaintGenerator(model_path=ckpt_path).to(device).eval()
     
     if use_half:
