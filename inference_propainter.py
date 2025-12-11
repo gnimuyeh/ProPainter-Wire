@@ -15,11 +15,8 @@ from core.utils import to_tensors
 from model.misc import get_device
 import warnings
 import av
-import OpenEXR
 import Imath
 import subprocess
-import threading
-import queue
 import gc
 import shutil
 from huggingface_hub import hf_hub_download
@@ -42,56 +39,30 @@ range_names = {0: 'tv', 1: 'tv', 2: 'pc'}
 def get_chromaticities(color_primaries):
     return primaries_dict.get(color_primaries, primaries_dict.get(1))
 
-# --- I/O Helpers ---
 
-def imwrite(img, file_path, color_info=None, auto_mkdir=True):
-    if auto_mkdir:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    
-    height, width, _ = img.shape
-    header = OpenEXR.Header(width, height)
-    header['channels'] = {'R': Imath.Channel(Imath.PixelType(Imath.PixelType.HALF)),
-                          'G': Imath.Channel(Imath.PixelType(Imath.PixelType.HALF)),
-                          'B': Imath.Channel(Imath.PixelType(Imath.PixelType.HALF))}
-    
-    if color_info and color_info['primaries'] is not None:
-        header['chromaticities'] = get_chromaticities(color_info['primaries'])
-    else:
-        header['chromaticities'] = get_chromaticities(1)
-
-    header['whiteLuminance'] = 1.0
-    header['compression'] = Imath.Compression(Imath.Compression.PIZ_COMPRESSION)
-
-    exr = OpenEXR.OutputFile(file_path, header)
-    img_half = (img / 65535.0).astype(np.float16)
-    
-    exr.writePixels({'R': img_half[:, :, 0].tobytes(), 
-                     'G': img_half[:, :, 1].tobytes(), 
-                     'B': img_half[:, :, 2].tobytes()})
-    exr.close()
-
-class AsyncFrameWriter:
-    def __init__(self, output_path, fps, color_info, save_frames=False, is_video=False):
-        self.queue = queue.Queue(maxsize=30)
+# --- Sync Frame Writer (Video Only) ---
+class SyncFrameWriter:
+    def __init__(self, output_path, fps, color_info):
         self.output_path = output_path
-        self.save_frames = save_frames
+        self.fps = fps
         self.color_info = color_info
-        self.stop_event = threading.Event()
         self.proc = None
-        self.is_video_mode = is_video and not save_frames
         
-        self.thread = threading.Thread(target=self._worker)
-        self.thread.start()
+        # Ensure output directory exists
+        os.makedirs(output_path, exist_ok=True)
 
-    def _init_ffmpeg(self, w, h, fps):
+    def _init_ffmpeg(self, w, h):
+        # High-Quality ProRes 4444 XQ settings
         cmd = [
             'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb48le',
-            '-s', f'{w}x{h}', '-r', str(fps), '-i', '-',
+            '-s', f'{w}x{h}', '-r', str(self.fps), '-i', '-',
             '-c:v', 'prores_ks', '-profile:v', '5', '-pix_fmt', 'yuv444p12le',
             '-vendor', 'apl0', '-bits_per_mb', '8000', '-quant_mat', 'hq',
             '-bitexact', '-movflags', '+write_colr+faststart',
             os.path.join(self.output_path, 'inpaint_out.mov')
         ]
+        
+        # Color Management
         c = self.color_info
         if c:
             cmd.insert(-1, '-color_primaries'); cmd.insert(-1, primaries_names.get(c['primaries'], 'bt709'))
@@ -99,37 +70,25 @@ class AsyncFrameWriter:
             cmd.insert(-1, '-color_trc'); cmd.insert(-1, transfer_names.get(c['transfer'], 'bt709'))
             cmd.insert(-1, '-color_range'); cmd.insert(-1, range_names.get(c['range'], 'tv'))
 
-        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    def _worker(self):
-        while not self.stop_event.is_set() or not self.queue.empty():
-            try:
-                item = self.queue.get(timeout=1)
-                frame, idx, width, height, fps = item
-                
-                if self.save_frames:
-                    imwrite(frame, os.path.join(self.output_path, str(idx).zfill(4)+'.exr'), 
-                           color_info=self.color_info, auto_mkdir=(idx==0))
-                else:
-                    if self.proc is None:
-                        self.proc = self._init_ffmpeg(width, height, fps)
-                    self.proc.stdin.write(frame.tobytes())
-                
-                self.queue.task_done()
-            except queue.Empty:
-                continue
+        # CRITICAL FIX: stderr=subprocess.DEVNULL prevents the deadlock
+        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def write(self, frame, idx=0, w=0, h=0, fps=24):
-        self.queue.put((frame, idx, w, h, fps))
+        # Initialize FFmpeg process on first write
+        if self.proc is None:
+            self.proc = self._init_ffmpeg(w, h)
+        
+        # Write directly to pipe (Synchronous)
+        try:
+            self.proc.stdin.write(frame.tobytes())
+        except BrokenPipeError:
+            print("Error: FFmpeg pipe broken. Video encoding failed.")
 
     def close(self):
-        self.stop_event.set()
-        self.thread.join()
         if self.proc:
             self.proc.stdin.close()
-            if self.proc.wait() != 0:
-                print(f"FFmpeg Error: {self.proc.stderr.read().decode()}")
-            self.proc.stderr.close()
+            self.proc.wait()
+
 
 # --- STREAMING COMPOSITOR ---
 class StreamingCompositor:
@@ -159,9 +118,6 @@ class StreamingCompositor:
         Writes frames STRICTLY in order. 
         Will only write frame 'N' if 'N-1' has been written.
         """
-        # We want to write everything in buffer <= up_to_idx
-        # But we must do it sequentially: 0, 1, 2, ...
-        
         while True:
             next_idx = self.last_written_idx + 1
             
@@ -384,7 +340,7 @@ def get_ref_index(mid_neighbor_id, neighbor_ids, length, ref_stride=10, ref_num=
 def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, width=-1, mask_dilation=0,
                   ref_stride=10, neighbor_length=10, subvideo_length=10, raft_iter=50,
                   mode='video_inpainting', scale_h=1.0, scale_w=1.2, save_fps=25,
-                  save_frames=True, fp16=False, save_masked_in=False, models=None, device=None):
+                  fp16=False, save_masked_in=False, models=None, device=None):
     
     if device is None: device = get_device()
     use_half = fp16 and device != torch.device('cpu')
@@ -465,10 +421,11 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
             updated_masks = updated_local_masks.view(1, video_length, 1, h, w)
             del prop_imgs, updated_local_masks
 
-    # --- COMPOSITION & ASYNC SAVING ---
+    # --- COMPOSITION & SYNC SAVING ---
     if not os.path.exists(output): os.makedirs(output, exist_ok=True)
     
-    writer = AsyncFrameWriter(output, fps, color_info, save_frames=save_frames, is_video=not save_frames)
+    # Initialize SyncFrameWriter (Video Only)
+    writer = SyncFrameWriter(output, fps, color_info)
     compositor = StreamingCompositor(writer, original_w, original_h, fps)
 
     neighbor_stride = neighbor_length // 2
@@ -507,8 +464,7 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
 
                 compositor.add_frames(batch_frames, neighbor_ids)
                 
-                # IMPORTANT: Flush up to the frame before the *start* of the current sliding window.
-                # frames inside the window are still being blended.
+                # Flush up to safe threshold
                 safe_threshold = max(0, f - neighbor_stride) - 1
                 compositor.flush(safe_threshold)
 
@@ -517,8 +473,9 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
     compositor.finish()
     writer.close()
     
-    if not save_frames and os.path.isfile(video):
-        final_vid_path = os.path.join(output, 'inpaint_out.mov')
+    # Metadata Copy
+    final_vid_path = os.path.join(output, 'inpaint_out.mov')
+    if os.path.isfile(video):
         copy_metadata(video, final_vid_path)
         
     print(f'\nAll results are saved in {output}')
@@ -541,7 +498,7 @@ if __name__ == '__main__':
     parser.add_argument('--scale_h', type=float, default=1.0)
     parser.add_argument('--scale_w', type=float, default=1.2)
     parser.add_argument('--save_fps', type=int, default=24)
-    parser.add_argument('--save_frames', action='store_true')
+    # Removed --save_frames argument
     parser.add_argument('--fp16', action='store_true')
     args = parser.parse_args()
     
@@ -559,7 +516,6 @@ if __name__ == '__main__':
         raft_iter=args.raft_iter,
         mode=args.mode,
         save_fps=args.save_fps,
-        save_frames=args.save_frames,
         fp16=args.fp16,
         save_masked_in=True,
         device=device
