@@ -141,8 +141,7 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
                 mask_dilation=0,    # Slight dilation handles compression artifacts in mask
                 neighbor_length=10,
                 fp16=True,
-                save_frames=False,
-                save_masked_in=False,
+                save_masked_in=True,
                 models=models,
                 device=device
             )
