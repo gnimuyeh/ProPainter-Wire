@@ -11,8 +11,10 @@ future
 tensorboard
 pyyaml
 openmim
-pycares>=4.4.0
+pycares>=4.0.0,<5.0.0
 aiodns>=3.2.0
+av
+matplotlib
 
 # --- Utilities ---
 tqdm
