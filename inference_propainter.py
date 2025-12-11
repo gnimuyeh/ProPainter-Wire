@@ -23,7 +23,7 @@ import queue
 import gc
 import shutil
 
-MODEL_PATH = "/runpod-volume/weights"
+MODEL_PATH = "weights"
 
 warnings.filterwarnings("ignore")
 pretrain_model_url = 'https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'
