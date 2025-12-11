@@ -11,6 +11,8 @@ future
 tensorboard
 pyyaml
 openmim
+pycares>=4.4.0
+aiodns>=3.2.0
 
 # --- Utilities ---
 tqdm
@@ -19,6 +21,7 @@ rich
 
 # --- Others ---
 runpod
+scipy
 huggingface_hub
 
 # --- Git Dependencies (Keep these!) ---
