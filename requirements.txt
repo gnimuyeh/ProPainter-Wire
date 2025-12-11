@@ -17,8 +17,9 @@ tqdm
 requests
 rich
 
-# --- RunPod Worker ---
+# --- Others ---
 runpod
+huggingface_hub
 
 # --- Git Dependencies (Keep these!) ---
 segment_anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf
