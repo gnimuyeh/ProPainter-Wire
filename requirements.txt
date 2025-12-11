@@ -21,7 +21,6 @@ rich
 
 # --- Others ---
 runpod
-scipy
 huggingface_hub
 
 # --- Git Dependencies (Keep these!) ---
