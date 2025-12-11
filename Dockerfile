@@ -21,4 +21,5 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # --- 3. RUN HANDLER ---
 # Make sure the script is executable
 RUN chmod +x runpod_handler.py
-CMD ["python", "-u", "runpod_handler.py"]
+# CMD ["python", "-u", "runpod_handler.py"]
+CMD ["sleep", "infinity"]
