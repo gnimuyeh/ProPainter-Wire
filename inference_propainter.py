@@ -26,6 +26,7 @@ MODEL_PATH = "weights"
 warnings.filterwarnings("ignore")
 
 # --- Color Management & Constants ---
+
 primaries_names = {1: 'bt709', 4: 'bt470m', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'film', 9: 'bt2020', 10: 'smpte428', 11: 'smpte431', 12: 'smpte432', 22: 'jedec-p22'}
 color_space_names = {0: 'rgb', 1: 'bt709', 4: 'fcc', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'ycgco', 9: 'bt2020nc', 10: 'bt2020c', 11: 'smpte2085', 12: 'chroma-derived-nc', 13: 'chroma-derived-c', 14: 'ictcp'}
 transfer_names = {1: 'bt709', 4: 'gamma22', 5: 'gamma28', 6: 'smpte170m', 7: 'smpte240m', 8: 'linear', 9: 'log100', 10: 'log316', 11: 'iec61966-2-4', 12: 'bt1361e', 13: 'iec61966-2-1', 14: 'bt2020-10', 15: 'bt2020-12', 16: 'smpte2084', 17: 'smpte428', 18: 'arib-std-b67'}
@@ -74,30 +75,30 @@ class SyncFrameWriter:
             self.proc.stdin.close()
             self.proc.wait()
 
-# --- MASK PREVIEW STREAMER (Low RAM, Low Def) ---
+# --- MASK PREVIEW STREAMER (High Quality MP4) ---
 def save_masked_preview_stream(frames, masks_pil, output_dir, fps):
     """
-    Streams frames through FFmpeg to create a low-def mp4 with green mask overlay.
-    Does not hold the video in RAM.
+    Streams frames through FFmpeg to create a Full-Res mp4 with green mask overlay.
     """
     if not frames or not masks_pil: return
 
     output_path = os.path.join(output_dir, 'masked_in.mp4')
     h, w = frames[0].shape[:2]
     
-    # Low-Def Settings: Scale width to 640, CRF 28, Fast preset
+    # UPDATED SETTINGS:
+    # - Removed '-vf scale=...' to keep original resolution
+    # - Changed '-crf' to 23 (High Quality)
     cmd = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
         '-s', f'{w}x{h}', '-r', str(fps), '-i', '-',
-        '-vf', 'scale=640:-2', 
-        '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
+        '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
         '-pix_fmt', 'yuv420p',
         output_path
     ]
     
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
     
-    print("Generating Masked Preview (Streaming)...")
+    print("Generating Masked Preview (Streaming High-Res)...")
     try:
         for i, frame_16bit in enumerate(frames):
             # 1. Convert 16-bit source to 8-bit for preview
