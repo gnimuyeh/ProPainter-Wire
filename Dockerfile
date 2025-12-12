@@ -22,5 +22,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Make sure the script is executable
 RUN chmod +x runpod_handler.py
 # Wrap the command in bash to catch errors
-CMD ["/bin/bash", "-c", "python -u runpod_handler.py > /workspace/handler_startup.log 2>&1 || sleep infinity"]
-# CMD ["python", "-u", "runpod_handler.py"]
+CMD ["python", "-u", "runpod_handler.py"]
