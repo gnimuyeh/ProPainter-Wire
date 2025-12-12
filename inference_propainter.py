@@ -15,7 +15,6 @@ from core.utils import to_tensors
 from model.misc import get_device
 import warnings
 import av
-import Imath
 import subprocess
 import gc
 import shutil
@@ -27,28 +26,18 @@ MODEL_PATH = "weights"
 warnings.filterwarnings("ignore")
 
 # --- Color Management & Constants ---
-primaries_dict = {
-    1: Imath.Chromaticities(Imath.V2f(0.64, 0.33), Imath.V2f(0.3, 0.6), Imath.V2f(0.15, 0.06), Imath.V2f(0.3127, 0.329)),
-    9: Imath.Chromaticities(Imath.V2f(0.708, 0.292), Imath.V2f(0.170, 0.797), Imath.V2f(0.131, 0.046), Imath.V2f(0.3127, 0.329)),
-}
 primaries_names = {1: 'bt709', 4: 'bt470m', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'film', 9: 'bt2020', 10: 'smpte428', 11: 'smpte431', 12: 'smpte432', 22: 'jedec-p22'}
 color_space_names = {0: 'rgb', 1: 'bt709', 4: 'fcc', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'ycgco', 9: 'bt2020nc', 10: 'bt2020c', 11: 'smpte2085', 12: 'chroma-derived-nc', 13: 'chroma-derived-c', 14: 'ictcp'}
 transfer_names = {1: 'bt709', 4: 'gamma22', 5: 'gamma28', 6: 'smpte170m', 7: 'smpte240m', 8: 'linear', 9: 'log100', 10: 'log316', 11: 'iec61966-2-4', 12: 'bt1361e', 13: 'iec61966-2-1', 14: 'bt2020-10', 15: 'bt2020-12', 16: 'smpte2084', 17: 'smpte428', 18: 'arib-std-b67'}
 range_names = {0: 'tv', 1: 'tv', 2: 'pc'}
 
-def get_chromaticities(color_primaries):
-    return primaries_dict.get(color_primaries, primaries_dict.get(1))
-
-
-# --- Sync Frame Writer (Video Only) ---
+# --- Sync Frame Writer (High Quality Output) ---
 class SyncFrameWriter:
     def __init__(self, output_path, fps, color_info):
         self.output_path = output_path
         self.fps = fps
         self.color_info = color_info
         self.proc = None
-        
-        # Ensure output directory exists
         os.makedirs(output_path, exist_ok=True)
 
     def _init_ffmpeg(self, w, h):
@@ -62,23 +51,19 @@ class SyncFrameWriter:
             os.path.join(self.output_path, 'inpaint_out.mov')
         ]
         
-        # Color Management
         c = self.color_info
         if c:
+            # We use safe .get() calls on the dictionaries defined above
             cmd.insert(-1, '-color_primaries'); cmd.insert(-1, primaries_names.get(c['primaries'], 'bt709'))
             cmd.insert(-1, '-colorspace'); cmd.insert(-1, color_space_names.get(c['matrix'], 'bt709'))
             cmd.insert(-1, '-color_trc'); cmd.insert(-1, transfer_names.get(c['transfer'], 'bt709'))
             cmd.insert(-1, '-color_range'); cmd.insert(-1, range_names.get(c['range'], 'tv'))
 
-        # CRITICAL FIX: stderr=subprocess.DEVNULL prevents the deadlock
         return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def write(self, frame, idx=0, w=0, h=0, fps=24):
-        # Initialize FFmpeg process on first write
         if self.proc is None:
             self.proc = self._init_ffmpeg(w, h)
-        
-        # Write directly to pipe (Synchronous)
         try:
             self.proc.stdin.write(frame.tobytes())
         except BrokenPipeError:
@@ -89,22 +74,78 @@ class SyncFrameWriter:
             self.proc.stdin.close()
             self.proc.wait()
 
+# --- MASK PREVIEW STREAMER (Low RAM, Low Def) ---
+def save_masked_preview_stream(frames, masks_pil, output_dir, fps):
+    """
+    Streams frames through FFmpeg to create a low-def mp4 with green mask overlay.
+    Does not hold the video in RAM.
+    """
+    if not frames or not masks_pil: return
+
+    output_path = os.path.join(output_dir, 'masked_in.mp4')
+    h, w = frames[0].shape[:2]
+    
+    # Low-Def Settings: Scale width to 640, CRF 28, Fast preset
+    cmd = [
+        'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+        '-s', f'{w}x{h}', '-r', str(fps), '-i', '-',
+        '-vf', 'scale=640:-2', 
+        '-c:v', 'libx264', '-crf', '28', '-preset', 'fast',
+        '-pix_fmt', 'yuv420p',
+        output_path
+    ]
+    
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    
+    print("Generating Masked Preview (Streaming)...")
+    try:
+        for i, frame_16bit in enumerate(frames):
+            # 1. Convert 16-bit source to 8-bit for preview
+            img = (frame_16bit / 257).astype(np.uint8)
+            
+            # 2. Prepare Mask (0 or 1)
+            mask_pil = masks_pil[i]
+            if mask_pil.size != (w, h):
+                mask_pil = mask_pil.resize((w, h), Image.NEAREST)
+            
+            # Convert mask to 0-1 range
+            m_arr = np.array(mask_pil.convert('L'))
+            mask_bool = np.zeros_like(m_arr, dtype=np.float32)
+            mask_bool[m_arr > 127] = 1.0
+            mask_3ch = np.expand_dims(mask_bool, 2).repeat(3, axis=2)
+
+            # 3. Create Green Overlay
+            green = np.zeros_like(img)
+            green[:, :, 1] = 255 
+
+            # 4. Blend
+            alpha = 0.6
+            fused = (1 - alpha) * img + alpha * green
+            
+            # Apply blend ONLY where mask is present
+            final_frame = (mask_3ch * fused + (1 - mask_3ch) * img).astype(np.uint8)
+            
+            # 5. Write to Pipe
+            proc.stdin.write(final_frame.tobytes())
+            
+    except Exception as e:
+        print(f"Warning: Could not save masked preview: {e}")
+    finally:
+        if proc:
+            proc.stdin.close()
+            proc.wait()
 
 # --- STREAMING COMPOSITOR ---
 class StreamingCompositor:
     def __init__(self, writer, original_w, original_h, fps):
         self.writer = writer
-        self.buffer = {} # Stores {idx: (img_sum, count)}
+        self.buffer = {} 
         self.last_written_idx = -1
         self.w = original_w
         self.h = original_h
         self.fps = fps
 
     def add_frames(self, frames_np, indices):
-        """
-        frames_np: List or Array of frames [N, H, W, 3] (uint16)
-        indices: List of frame indices
-        """
         for i, idx in enumerate(indices):
             img = frames_np[i].astype(np.float32)
             if idx in self.buffer:
@@ -114,34 +155,20 @@ class StreamingCompositor:
                 self.buffer[idx] = (img, 1)
 
     def flush(self, up_to_idx):
-        """
-        Writes frames STRICTLY in order. 
-        Will only write frame 'N' if 'N-1' has been written.
-        """
         while True:
             next_idx = self.last_written_idx + 1
-            
-            # If the next expected frame is in buffer AND is safe to write
             if next_idx in self.buffer and next_idx <= up_to_idx:
                 s, c = self.buffer[next_idx]
-                
-                # Average
                 final_img = (s / c)
                 final_img = np.clip(final_img, 0, 65535).astype(np.uint16)
-                
-                # Crop
                 final_img = final_img[:self.h, :self.w, :]
-                
                 self.writer.write(final_img, idx=next_idx, w=self.w, h=self.h, fps=self.fps)
-                
                 del self.buffer[next_idx]
                 self.last_written_idx = next_idx
             else:
-                # We either caught up to up_to_idx OR we are missing a frame (gap)
                 break
 
     def finish(self):
-        """Flush remaining buffer regardless of threshold."""
         self.flush(float('inf'))
 
 def copy_metadata(source_path, target_path):
@@ -220,7 +247,7 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         for packet in container.demux(container.streams.video[0]):
             for frame in packet.decode():
                 img = frame.to_ndarray(format='rgb24')
-                masks_img.append(Image.fromarray(img[:, :, 1])) # Green channel
+                masks_img.append(Image.fromarray(img[:, :, 1])) 
         container.close()
     elif mpath.endswith(('jpg', 'png', 'exr', 'tga')):
         masks_img = [Image.open(mpath)]
@@ -235,7 +262,6 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
         if current_len > length: masks_img = masks_img[:length]
         else: masks_img.extend([masks_img[-1]] * (length - current_len))
 
-    # DEBUG
     if len(masks_img) > 0:
         t = np.array(masks_img[0])
         print(f"[Mask Debug] Min: {t.min()} Max: {t.max()} (Safe Threshold > 127 applied)")
@@ -247,8 +273,6 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
             mask_img = mask_img.resize(size, Image.NEAREST)
         
         m_arr = np.array(mask_img.convert('L'))
-        
-        # --- FIXED THRESHOLD (> 127) ---
         binary = np.zeros_like(m_arr)
         binary[m_arr > 127] = 1 
         
@@ -269,52 +293,36 @@ def read_mask(mpath, length, size, flow_mask_dilates=8, mask_dilates=5):
 
 def load_models(device, use_half=False):
     print(f"--- Loading models from Hugging Face: {HF_REPO_ID} ---")
-    
-    # Get token from environment
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
-        print("⚠️ WARNING: HF_TOKEN env var not found. If your repo is private, download will fail.")
+        print("⚠️ WARNING: HF_TOKEN env var not found.")
 
-    # Helper to download and get absolute path
     def get_model_path(filename):
-        # Construct the full local path manually
         local_file_path = os.path.join(MODEL_PATH, filename)
-        
-        # 1. SPEED CHECK: If we already have it, return immediately.
-        # This avoids the network handshake entirely on Warm Starts.
         if os.path.exists(local_file_path):
             print(f"✅ Found local cache: {filename}")
             return local_file_path
-
-        # 2. DOWNLOAD: Only happens on Cold Start
         print(f"⬇️ Downloading {filename} from HF...")
         return hf_hub_download(
-            repo_id=HF_REPO_ID,
-            filename=filename,
-            local_dir=MODEL_PATH,
-            token=hf_token,
-            local_dir_use_symlinks=False # Ensures it is a real file, not a symlink
+            repo_id=HF_REPO_ID, filename=filename, local_dir=MODEL_PATH,
+            token=hf_token, local_dir_use_symlinks=False
         )
 
-    # 1. RAFT
     print("Loading RAFT...")
     ckpt_path = get_model_path('raft-things.pth')
     fix_raft = RAFT_bi(ckpt_path, device)
     
-    # 2. Recurrent Flow Completion
     print("Loading Flow Completion...")
     ckpt_path = get_model_path('recurrent_flow_completion.pth')
     fix_flow_complete = RecurrentFlowCompleteNet(ckpt_path)
     for p in fix_flow_complete.parameters(): p.requires_grad = False
     fix_flow_complete.to(device).eval()
     
-    # 3. ProPainter
     print("Loading ProPainter...")
     ckpt_path = get_model_path('ProPainter.pth')
     model = InpaintGenerator(model_path=ckpt_path).to(device).eval()
     
     if use_half:
-        # Note: RAFT usually kept in FP32 for stability, as per your original script
         fix_flow_complete = fix_flow_complete.half()
         model = model.half()
     
@@ -361,6 +369,12 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
         frames, frames_pil_masks, padded_size, (pad_w, pad_h) = pad_frames_to_div8(frames, raw_masks_dilated)
         w, h = padded_size
         
+        # --- STREAM SAVE MASKED INPUT (LOW RAM) ---
+        if save_masked_in:
+            if not os.path.exists(output): os.makedirs(output, exist_ok=True)
+            save_masked_preview_stream(frames, frames_pil_masks, output, fps)
+        # -----------------------------------------------------
+
         flow_masks_tensor = torch.stack([torch.from_numpy(np.array(m)).float() / 255.0 for m in frames_pil_masks]).unsqueeze(1)
         masks_dilated_tensor = torch.stack([torch.from_numpy(np.array(m)).float() / 255.0 for m in frames_pil_masks]).unsqueeze(1)
     
@@ -399,7 +413,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
             gt_flows_f_list, gt_flows_b_list = [], []
             for f in range(0, video_length, short_clip_len):
                 end_f = min(video_length, f + short_clip_len)
-                # We cast the input slice to .float() because fix_raft is running in FP32
                 if f == 0: 
                     flows_f, flows_b = fix_raft(frames_tensor[:, f:end_f].float(), iters=raft_iter)
                 else: 
@@ -424,7 +437,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
     # --- COMPOSITION & SYNC SAVING ---
     if not os.path.exists(output): os.makedirs(output, exist_ok=True)
     
-    # Initialize SyncFrameWriter (Video Only)
     writer = SyncFrameWriter(output, fps, color_info)
     compositor = StreamingCompositor(writer, original_w, original_h, fps)
 
@@ -463,8 +475,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
                     batch_frames.append(frame)
 
                 compositor.add_frames(batch_frames, neighbor_ids)
-                
-                # Flush up to safe threshold
                 safe_threshold = max(0, f - neighbor_stride) - 1
                 compositor.flush(safe_threshold)
 
@@ -473,7 +483,6 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
     compositor.finish()
     writer.close()
     
-    # Metadata Copy
     final_vid_path = os.path.join(output, 'inpaint_out.mov')
     if os.path.isfile(video):
         copy_metadata(video, final_vid_path)
@@ -498,8 +507,8 @@ if __name__ == '__main__':
     parser.add_argument('--scale_h', type=float, default=1.0)
     parser.add_argument('--scale_w', type=float, default=1.2)
     parser.add_argument('--save_fps', type=int, default=24)
-    # Removed --save_frames argument
     parser.add_argument('--fp16', action='store_true')
+    parser.add_argument('--save_masked_in', action='store_true')
     args = parser.parse_args()
     
     run_inference(
@@ -517,6 +526,6 @@ if __name__ == '__main__':
         mode=args.mode,
         save_fps=args.save_fps,
         fp16=args.fp16,
-        save_masked_in=True,
+        save_masked_in=args.save_masked_in,
         device=device
     )
