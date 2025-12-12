@@ -102,6 +102,8 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
                  mask_path = mask_path_alt
 
         final_out = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_result{ext}")
+        # Define output path for the mask preview
+        final_mask_preview = os.path.join(LOCAL_OUTPUT_DIR, f"{basename}_mask_preview.mp4")
 
         # --- PROGRESS UPDATE ---
         msg = f"Processing: {file} ({processed_count + 1}/{total_files})"
@@ -130,31 +132,38 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
                 cap.release()
             except: pass
 
-            # 3. Inference (Directly passing mask_path, NO FFmpeg conversion step)
+            # 3. Inference 
             run_inference(
                 video=video_path,
-                mask=mask_path,  # Passing the raw mask video path
+                mask=mask_path, 
                 output=LOCAL_OUTPUT_DIR,
-                subvideo_length=30, # Increased for better temporal consistency if VRAM allows
-                raft_iter=20,       # 20 is usually sufficient for wires, 30 is safer
+                subvideo_length=30, 
+                raft_iter=20,       
                 ref_stride=10,
-                mask_dilation=0,    # Slight dilation handles compression artifacts in mask
+                mask_dilation=0,    
                 neighbor_length=10,
                 fp16=True,
-                save_masked_in=True,
+                save_masked_in=True, # Ensure this is ON
                 models=models,
                 device=device
             )
 
-            # 4. Rename result (Inference saves as 'inpaint_out.mov')
+            # 4. Rename results
+            # The inference script outputs 'inpaint_out.mov' and 'masked_in.mp4'
+            # We must move them immediately to avoid overwriting in the next loop iteration
+            
             temp_result = os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")
+            temp_mask_preview = os.path.join(LOCAL_OUTPUT_DIR, "masked_in.mp4")
+
             if os.path.exists(temp_result):
                 shutil.move(temp_result, final_out)
+            
+            if os.path.exists(temp_mask_preview):
+                shutil.move(temp_mask_preview, final_mask_preview)
             
             processed_count += 1
             
             # --- CRITICAL: VRAM CLEANUP ---
-            # Python's GC doesn't always free Torch tensors immediately
             gc.collect()
             torch.cuda.empty_cache()
             # ------------------------------
@@ -164,9 +173,11 @@ def run_job(job_id: str, source_url: str, progress_callback=None) -> dict:
             print(f"❌ Error processing {file}: {error_msg}")
             failed_files.append({"file": file, "error": error_msg})
             
-            # Clean up potential partial file
+            # Clean up potential partial files
             if os.path.exists(os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov")):
                 os.remove(os.path.join(LOCAL_OUTPUT_DIR, "inpaint_out.mov"))
+            if os.path.exists(os.path.join(LOCAL_OUTPUT_DIR, "masked_in.mp4")):
+                os.remove(os.path.join(LOCAL_OUTPUT_DIR, "masked_in.mp4"))
                 
             # Try to reset memory even on failure
             gc.collect()
