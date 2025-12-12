@@ -15,7 +15,6 @@ from core.utils import to_tensors
 from model.misc import get_device
 import warnings
 import av
-import Imath
 import subprocess
 import gc
 import shutil
@@ -27,17 +26,10 @@ MODEL_PATH = "weights"
 warnings.filterwarnings("ignore")
 
 # --- Color Management & Constants ---
-primaries_dict = {
-    1: Imath.Chromaticities(Imath.V2f(0.64, 0.33), Imath.V2f(0.3, 0.6), Imath.V2f(0.15, 0.06), Imath.V2f(0.3127, 0.329)),
-    9: Imath.Chromaticities(Imath.V2f(0.708, 0.292), Imath.V2f(0.170, 0.797), Imath.V2f(0.131, 0.046), Imath.V2f(0.3127, 0.329)),
-}
 primaries_names = {1: 'bt709', 4: 'bt470m', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'film', 9: 'bt2020', 10: 'smpte428', 11: 'smpte431', 12: 'smpte432', 22: 'jedec-p22'}
 color_space_names = {0: 'rgb', 1: 'bt709', 4: 'fcc', 5: 'bt470bg', 6: 'smpte170m', 7: 'smpte240m', 8: 'ycgco', 9: 'bt2020nc', 10: 'bt2020c', 11: 'smpte2085', 12: 'chroma-derived-nc', 13: 'chroma-derived-c', 14: 'ictcp'}
 transfer_names = {1: 'bt709', 4: 'gamma22', 5: 'gamma28', 6: 'smpte170m', 7: 'smpte240m', 8: 'linear', 9: 'log100', 10: 'log316', 11: 'iec61966-2-4', 12: 'bt1361e', 13: 'iec61966-2-1', 14: 'bt2020-10', 15: 'bt2020-12', 16: 'smpte2084', 17: 'smpte428', 18: 'arib-std-b67'}
 range_names = {0: 'tv', 1: 'tv', 2: 'pc'}
-
-def get_chromaticities(color_primaries):
-    return primaries_dict.get(color_primaries, primaries_dict.get(1))
 
 # --- Sync Frame Writer (High Quality Output) ---
 class SyncFrameWriter:
@@ -61,6 +53,7 @@ class SyncFrameWriter:
         
         c = self.color_info
         if c:
+            # We use safe .get() calls on the dictionaries defined above
             cmd.insert(-1, '-color_primaries'); cmd.insert(-1, primaries_names.get(c['primaries'], 'bt709'))
             cmd.insert(-1, '-colorspace'); cmd.insert(-1, color_space_names.get(c['matrix'], 'bt709'))
             cmd.insert(-1, '-color_trc'); cmd.insert(-1, transfer_names.get(c['transfer'], 'bt709'))
@@ -92,10 +85,7 @@ def save_masked_preview_stream(frames, masks_pil, output_dir, fps):
     output_path = os.path.join(output_dir, 'masked_in.mp4')
     h, w = frames[0].shape[:2]
     
-    # Low-Def Settings:
-    # - Scale width to 640 (keep aspect ratio)
-    # - H.264 compression (CRF 28)
-    # - Fast preset
+    # Low-Def Settings: Scale width to 640, CRF 28, Fast preset
     cmd = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
         '-s', f'{w}x{h}', '-r', str(fps), '-i', '-',
@@ -105,7 +95,6 @@ def save_masked_preview_stream(frames, masks_pil, output_dir, fps):
         output_path
     ]
     
-    # Start FFmpeg
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
     
     print("Generating Masked Preview (Streaming)...")
@@ -126,17 +115,14 @@ def save_masked_preview_stream(frames, masks_pil, output_dir, fps):
             mask_3ch = np.expand_dims(mask_bool, 2).repeat(3, axis=2)
 
             # 3. Create Green Overlay
-            # Green layer: [0, 255, 0]
             green = np.zeros_like(img)
             green[:, :, 1] = 255 
 
             # 4. Blend
-            # Formula: (1-alpha)*img + alpha*green
             alpha = 0.6
             fused = (1 - alpha) * img + alpha * green
             
             # Apply blend ONLY where mask is present
-            # result = mask * fused + (1-mask) * img
             final_frame = (mask_3ch * fused + (1 - mask_3ch) * img).astype(np.uint8)
             
             # 5. Write to Pipe
@@ -383,7 +369,7 @@ def run_inference(video, mask, output='results', resize_ratio=1.0, height=-1, wi
         frames, frames_pil_masks, padded_size, (pad_w, pad_h) = pad_frames_to_div8(frames, raw_masks_dilated)
         w, h = padded_size
         
-        # --- NEW STEP: STREAM SAVE MASKED INPUT (LOW RAM) ---
+        # --- STREAM SAVE MASKED INPUT (LOW RAM) ---
         if save_masked_in:
             if not os.path.exists(output): os.makedirs(output, exist_ok=True)
             save_masked_preview_stream(frames, frames_pil_masks, output, fps)
